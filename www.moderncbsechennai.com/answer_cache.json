@@ -1,0 +1,34 @@
+{
+  "hi": {
+    "answer": "Welcome to Modern Senior Secondary School! I'm Brightly, your assistant. How can I help you today?",
+    "verified": true
+  },
+  "who is the principal?": {
+    "answer": "The Principal of Modern School is Smt. Sripriya Rajarajan, M.Sc. (Physics), M.Phil., (Physics).",
+    "verified": true
+  },
+  "what are the fees for LKG?": {
+    "answer": "For LKG, the annual fee is ₹700.",
+    "verified": true
+  },
+  "total fee for LKG": {
+    "answer": "The Grand Total for LKG is ₹25,050.",
+    "verified": true
+  },
+  "fee structure for LKG": {
+    "answer": "Annual Fee: ₹700, Tuition Fee: ₹4500, Book Fees: ₹1850, Amenity Fee: ₹3000. TERM-1 TOTAL: ₹10050, TERM-2 TOTAL: ₹7500, TERM-3 TOTAL: ₹7500. GRAND TOTAL: ₹25050",
+    "verified": true
+  },
+  "who is the president of India?": {
+    "answer": "Sorry, I don’t have direct information on that. Try asking something else.",
+    "verified": false
+  },
+  "example appreciation": {
+    "answer": "Thank you for your kind words!",
+    "verified": true
+  },
+  "example complaint": {
+    "answer": "I understand your concern. Let's see how I can help.",
+    "verified": true
+  }
+}

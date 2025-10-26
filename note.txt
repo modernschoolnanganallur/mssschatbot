@@ -1,0 +1,21 @@
+1)while creating a new txt in the data or changing it ,
+ plz check the vectorstore and delete the renamed one.
+
+Rebuild the vectors on startup
+
+Only do this when you actually want to refresh from data/*.txt.
+
+gcloud run deploy msss-backend \
+  --image=$REGION-docker.pkg.dev/$PROJECT/msss-repo/msss-backend:$TAG \
+  --region=$REGION --project=$PROJECT --allow-unauthenticated \
+  --set-env-vars=EMBED_PROVIDER=vertex,REFRESH_VECTORS_ON_STARTUP=true \
+  --port=8080 --cpu=1 --memory=1Gi --timeout=900s
+
+
+Then switch it back to false on the next deploy to avoid slow startups.
+
+Quick sanity check in logs (you should see the “Vector stores … loaded” lines):
+
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="msss-backend"' \
+  --project $PROJECT --limit 100 --format="value(textPayload)"

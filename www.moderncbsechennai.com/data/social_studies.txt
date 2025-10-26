@@ -1,0 +1,11 @@
+GEOGRAPHY:
+- The Earth has three layers: Crust, Mantle, Core.
+- Rotation causes day and night; revolution causes seasons.
+
+HISTORY:
+- The Indus Valley Civilization was one of the earliest urban cultures.
+- The Indian National Congress was founded in 1885.
+
+CIVICS:
+- Democracy means rule by the people.
+- Fundamental Rights include Right to Equality, Freedom, Education, etc.

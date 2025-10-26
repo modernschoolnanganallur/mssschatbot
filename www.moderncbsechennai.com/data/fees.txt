@@ -1,0 +1,199 @@
+---AS of 2023-2024---
+
+--- FEE STRUCTURE FOR LKG (LKG Grade) (LKG Std) (LKG Standard) (LKG Class) ---
+GRADE: LKG (LKG Grade) (LKG Std) (LKG Standard) (LKG Class)
+Annual Fee: ₹700
+Tuition Fee: ₹4500
+Book Fees: ₹1850
+Amenity Fee: ₹3000
+TERM-1 TOTAL: ₹10050
+TERM-2 TOTAL: ₹7500
+TERM-3 TOTAL: ₹7500
+GRAND TOTAL: ₹25050
+
+--- FEE STRUCTURE FOR UKG (UKG Grade) (UKG Std) (UKG Standard) (UKG Class) ---
+GRADE: UKG (UKG Grade) (UKG Std) (UKG Standard) (UKG Class)
+Annual Fee: ₹700
+Tuition Fee: ₹4500
+Book Fees: ₹1900
+Amenity Fee: ₹3000
+TERM-1 TOTAL: ₹10100
+TERM-2 TOTAL: ₹7500
+TERM-3 TOTAL: ₹7500
+GRAND TOTAL: ₹25100
+
+--- FEE STRUCTURE FOR I (1st Grade) (1st Std) (1st Standard) (1st Class) ---
+GRADE: I (1st Grade) (1st Std) (1st Standard) (1st Class)
+Annual Fee: ₹800
+Tuition Fee: ₹5200
+Book Fees: ₹2660
+Amenity Fee: ₹3500
+TERM-1 TOTAL: ₹12160
+TERM-2 TOTAL: ₹8700
+TERM-3 TOTAL: ₹8700
+GRAND TOTAL: ₹29560
+
+--- FEE STRUCTURE FOR II (2nd Grade) (2nd Std) (2nd Standard) (2nd Class) ---
+GRADE: II (2nd Grade) (2nd Std) (2nd Standard) (2nd Class)
+Annual Fee: ₹800
+Tuition Fee: ₹5200
+Book Fees: ₹2780
+Amenity Fee: ₹3500
+TERM-1 TOTAL: ₹12280
+TERM-2 TOTAL: ₹8700
+TERM-3 TOTAL: ₹8700
+GRAND TOTAL: ₹29680
+
+--- FEE STRUCTURE FOR III (3rd Grade) (3rd Std) (3rd Standard) (3rd Class) ---
+GRADE: III (3rd Grade) (3rd Std) (3rd Standard) (3rd Class)
+Annual Fee: ₹800
+Tuition Fee: ₹5200
+Book Fees: ₹3180
+Amenity Fee: ₹3500
+TERM-1 TOTAL: ₹12680
+TERM-2 TOTAL: ₹8700
+TERM-3 TOTAL: ₹8700
+GRAND TOTAL: ₹30080
+
+--- FEE STRUCTURE FOR IV (4th Grade) (4th Std) (4th Standard) (4th Class) ---
+GRADE: IV (4th Grade) (4th Std) (4th Standard) (4th Class)
+Annual Fee: ₹800
+Tuition Fee: ₹5200
+Book Fees: ₹3570
+Amenity Fee: ₹3500
+TERM-1 TOTAL: ₹13070
+TERM-2 TOTAL: ₹8700
+TERM-3 TOTAL: ₹8700
+GRAND TOTAL: ₹30470
+
+--- FEE STRUCTURE FOR V (5th Grade) (5th Std) (5th Standard) (5th Class) ---
+GRADE: V (5th Grade) (5th Std) (5th Standard) (5th Class)
+Annual Fee: ₹800
+Tuition Fee: ₹5200
+Book Fees: ₹3680
+Amenity Fee: ₹3500
+TERM-1 TOTAL: ₹13180
+TERM-2 TOTAL: ₹8700
+TERM-3 TOTAL: ₹8700
+GRAND TOTAL: ₹30580
+
+--- FEE STRUCTURE FOR VI (6th Grade) (6th Std) (6th Standard) (6th Class) ---
+GRADE: VI (6th Grade) (6th Std) (6th Standard) (6th Class)
+Annual Fee: ₹900
+Tuition Fee: ₹6200
+Book Fees: ₹3430
+Amenity Fee: ₹4000
+TERM-1 TOTAL: ₹14530
+TERM-2 TOTAL: ₹10200
+TERM-3 TOTAL: ₹10200
+GRAND TOTAL: ₹34930
+
+--- FEE STRUCTURE FOR VII (7th Grade) (7th Std) (7th Standard) (7th Class) ---
+GRADE: VII (7th Grade) (7th Std) (7th Standard) (7th Class)
+Annual Fee: ₹900
+Tuition Fee: ₹6200
+Book Fees: ₹3500
+Amenity Fee: ₹4000
+TERM-1 TOTAL: ₹14600
+TERM-2 TOTAL: ₹10200
+TERM-3 TOTAL: ₹10200
+GRAND TOTAL: ₹35000
+
+--- FEE STRUCTURE FOR VIII (8th Grade) (8th Std) (8th Standard) (8th Class) ---
+GRADE: VIII (8th Grade) (8th Std) (8th Standard) (8th Class)
+Annual Fee: ₹900
+Tuition Fee: ₹6200
+Book Fees: ₹3550
+Amenity Fee: ₹4000
+TERM-1 TOTAL: ₹14650
+TERM-2 TOTAL: ₹10200
+TERM-3 TOTAL: ₹10200
+GRAND TOTAL: ₹35050
+
+--- FEE STRUCTURE FOR IX (9th Grade) (9th Std) (9th Standard) (9th Class) ---
+GRADE: IX (9th Grade) (9th Std) (9th Standard) (9th Class)
+Annual Fee: ₹1000
+Tuition Fee: ₹7000
+Book Fees: ₹1870
+Amenity Fee: ₹4600
+TERM-1 TOTAL: ₹14470
+TERM-2 TOTAL: ₹11600
+TERM-3 TOTAL: ₹11600
+GRAND TOTAL: ₹37670
+
+--- FEE STRUCTURE FOR X (10th Grade) (10th Std) (10th Standard) (10th Class) ---
+GRADE: X (10th Grade) (10th Std) (10th Standard) (10th Class)
+Annual Fee: ₹1000
+Tuition Fee: ₹7000
+Book Fees: ₹2025
+Amenity Fee: ₹4600
+TERM-1 TOTAL: ₹14625
+TERM-2 TOTAL: ₹11600
+TERM-3 TOTAL: ₹11600
+GRAND TOTAL: ₹37825
+
+--- FEE STRUCTURE FOR XI-CS (11th Grade CS) (11th Std CS) (11th Standard CS) (11th Class CS) ---
+GRADE: XI-CS (11th Grade CS) (11th Std CS) (11th Standard CS) (11th Class CS)
+Annual Fee: ₹1200
+Tuition Fee: ₹7700
+Book Fees: ₹1550
+Amenity Fee: ₹5200
+TERM-1 TOTAL: ₹15650
+TERM-2 TOTAL: ₹12900
+TERM-3 TOTAL: ₹12900
+GRAND TOTAL: ₹41450
+
+--- FEE STRUCTURE FOR XI-BIO (11th Grade BIO) (11th Std BIO) (11th Standard BIO) (11th Class BIO) ---
+GRADE: XI-BIO (11th Grade BIO) (11th Std BIO) (11th Standard BIO) (11th Class BIO)
+Annual Fee: ₹1200
+Tuition Fee: ₹7700
+Book Fees: ₹1130
+Amenity Fee: ₹5200
+TERM-1 TOTAL: ₹15230
+TERM-2 TOTAL: ₹12900
+TERM-3 TOTAL: ₹12900
+GRAND TOTAL: ₹41030
+
+--- FEE STRUCTURE FOR XI-COMM (11th Grade COMM) (11th Std COMM) (11th Standard COMM) (11th Class COMM) ---
+GRADE: XI-COMM (11th Grade COMM) (11th Std COMM) (11th Standard COMM) (11th Class COMM)
+Annual Fee: ₹1200
+Tuition Fee: ₹7700
+Book Fees: ₹2470
+Amenity Fee: ₹5200
+TERM-1 TOTAL: ₹16570
+TERM-2 TOTAL: ₹12900
+TERM-3 TOTAL: ₹12900
+GRAND TOTAL: ₹42370
+
+--- FEE STRUCTURE FOR XII-CS (12th Grade CS) (12th Std CS) (12th Standard CS) (12th Class CS) ---
+GRADE: XII-CS (12th Grade CS) (12th Std CS) (12th Standard CS) (12th Class CS)
+Annual Fee: ₹1200
+Tuition Fee: ₹7700
+Book Fees: ₹1735
+Amenity Fee: ₹5200
+TERM-1 TOTAL: ₹15835
+TERM-2 TOTAL: ₹12900
+TERM-3 TOTAL: ₹12900
+GRAND TOTAL: ₹41635
+
+--- FEE STRUCTURE FOR XII-BIO (12th Grade BIO) (12th Std BIO) (12th Standard BIO) (12th Class BIO) ---
+GRADE: XII-BIO (12th Grade BIO) (12th Std BIO) (12th Standard BIO) (12th Class BIO)
+Annual Fee: ₹1200
+Tuition Fee: ₹7700
+Book Fees: ₹1285
+Amenity Fee: ₹5200
+TERM-1 TOTAL: ₹15385
+TERM-2 TOTAL: ₹12900
+TERM-3 TOTAL: ₹12900
+GRAND TOTAL: ₹41185
+
+--- FEE STRUCTURE FOR XII-COMM (12th Grade COMM) (12th Std COMM) (12th Standard COMM) (12th Class COMM) ---
+GRADE: XII-COMM (12th Grade COMM) (12th Std COMM) (12th Standard COMM) (12th Class COMM)
+Annual Fee: ₹1200
+Tuition Fee: ₹7700
+Book Fees: ₹3250
+Amenity Fee: ₹5200
+TERM-1 TOTAL: ₹17350
+TERM-2 TOTAL: ₹12900
+TERM-3 TOTAL: ₹12900
+GRAND TOTAL: ₹43150

@@ -1,0 +1,15 @@
+CHAPTER: Structure of Atom
+- Proton: +1 charge, mass = 1 amu
+- Neutron: neutral, mass = 1 amu
+- Electron: -1 charge, negligible mass
+- Atomic number (Z) = number of protons
+- Mass number (A) = protons + neutrons
+
+CHAPTER: Chemical Reactions
+- Law of conservation of mass: Matter cannot be created or destroyed.
+- Types of reactions: Combination, Decomposition, Displacement, Double Displacement, Oxidation–Reduction.
+- Example: 2H₂ + O₂ → 2H₂O
+
+CHAPTER: Periodic Classification
+- Mendeleev arranged elements based on increasing atomic mass.
+- Modern periodic law: Properties of elements are periodic functions of their atomic numbers.

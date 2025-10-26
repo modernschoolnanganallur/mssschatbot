@@ -1,0 +1,17 @@
+CHAPTER: Laws of Motion
+- Newton's First Law: A body remains in rest or uniform motion unless acted upon by an external force.
+- Newton's Second Law: Force = mass × acceleration (F = ma)
+- Momentum (p) = m × v
+- Newton's Third Law: Every action has an equal and opposite reaction.
+
+CHAPTER: Work, Power and Energy
+- Work = Force × Displacement × cos(θ)
+- Power = Work done / Time
+- Kinetic Energy = ½ m v²
+- Potential Energy = m g h
+- Total mechanical energy is conserved in the absence of friction.
+
+CHAPTER: Light – Reflection and Refraction
+- Mirror formula: 1/f = 1/v + 1/u
+- Lens formula: 1/f = 1/v - 1/u
+- Magnification (m) = h₂/h₁ = v/u

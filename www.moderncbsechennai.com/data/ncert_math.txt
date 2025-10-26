@@ -1,0 +1,14 @@
+CHAPTER: Algebra
+- (a + b)² = a² + 2ab + b²
+- (a - b)² = a² - 2ab + b²
+- (a + b + c)² = a² + b² + c² + 2(ab + bc + ca)
+- Quadratic formula: x = [-b ± √(b² - 4ac)] / 2a
+
+CHAPTER: Trigonometry
+- sin²θ + cos²θ = 1
+- tanθ = sinθ / cosθ
+- sin(0°)=0, sin(30°)=½, sin(45°)=√2/2, sin(60°)=√3/2, sin(90°)=1
+
+CHAPTER: Calculus
+- d/dx (xⁿ) = n xⁿ⁻¹
+- ∫ xⁿ dx = (xⁿ⁺¹)/(n+1) + C

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+vectorstore/
+sessions/
+*.sqlite3
+.vscode/
+.env

@@ -1,0 +1,42 @@
+@charset "utf-8";
+/* CSS Document */
+body {
+	
+	
+	background-color:#15305b;
+	
+	
+	}
+.mycus{
+	color:#FFF;
+	font-size:14px;}
+	.mycus1{
+		color:#FFF;
+	font-size:16px;
+	font-family:Arial, Helvetica, sans-serif;
+	}
+	
+.head-font{
+	font-family:Arial, Helvetica, sans-serif;
+	font-weight:bold;
+	color:#FFF;
+	text-shadow:text-shadow: 1px 5px 2px #000;
+
+	
+	}
+	
+.border-div{
+	
+	border:#FFF dotted 2px 2px 2px 2px; }	
+	
+	
+.val-back{
+	font-family:Arial, Helvetica, sans-serif;
+	font-weight:bold;
+	color:#f4a024;
+	
+	}
+tr{
+	background-color:white;
+}
+	

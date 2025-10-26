@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: msss-backend
+    env: python
+    branch: main
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "./start.sh"
+    plan: free
+
