@@ -1,8 +1,8 @@
 fastapi
 uvicorn[standard]
 openai
-pydantic
-sympy
+langchain
+langchain-openai
+langchain-community
+faiss-cpu
 numpy
-requests
-python-dotenv
