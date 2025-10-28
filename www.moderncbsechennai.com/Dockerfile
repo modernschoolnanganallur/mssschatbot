@@ -10,4 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Use exec form for reliable PID 1 signal handling
 CMD ["bash", "start.sh"]
