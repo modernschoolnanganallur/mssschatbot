@@ -5,6 +5,7 @@ import math
 import re
 import random
 import logging
+import hashlib
 from datetime import datetime
 
 from fastapi import FastAPI, Request
@@ -12,6 +13,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+
+# Attempt to import your vector loader; fallback to None
+try:
+    from vector import load_vector_store
+except Exception as e:
+    load_vector_store = None
+    # We'll log later when logger is available
+
+# Ollama LLM import
+try:
+    from langchain_ollama import OllamaLLM
+except Exception:
+    OllamaLLM = None
 
 # ======================
 # Logging / Debug
@@ -36,55 +50,63 @@ GOOGLE_CLOUD_PROJECT = env("GOOGLE_CLOUD_PROJECT", DEFAULT_PROJECT)
 GOOGLE_CLOUD_LOCATION = env("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
 REFRESH_VECTORS_ON_STARTUP = env("REFRESH_VECTORS_ON_STARTUP", "true").lower() == "true"
 
-# ----------------------
-# Vertex AI setup
-# ----------------------
-try:
-    from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
-except Exception as e:
-    log.error(f"❌ VertexAI import failed: {e}")
+# ======================
+# Replacement for Vertex embeddings: deterministic lightweight embedder
+# ======================
+class SimpleEmbedder:
+    """
+    Deterministic, lightweight embedding fallback.
+    Produces a fixed-length float vector from text using repeated SHA-256.
+    Not semantically strong but deterministic for similarity ranking fallback.
+    """
+    def __init__(self, dim: int = 512):
+        self.dim = dim
+
+    def embed_query(self, text: str):
+        if text is None:
+            return [0.0] * self.dim
+        # seed with text bytes
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        vec = []
+        prev = h
+        while len(vec) < self.dim:
+            prev = hashlib.sha256(prev).digest()
+            vec.extend([b / 255.0 for b in prev])
+        return vec[:self.dim]
 
 # ----------------------
-# Vector store import
+# Ollama (llama3.2) setup
 # ----------------------
-try:
-    from vector import load_vector_store
-except Exception as e:
-    load_vector_store = None
-    log.info(f"ℹ️ vector.py not available or failed to import: {e}")
-
-# ----------------------
-# Lazy constructors
-# ----------------------
-def get_embedding_model():
-    return VertexAIEmbeddings(
-        model_name="text-embedding-004",
-        project=GOOGLE_CLOUD_PROJECT,
-        location=GOOGLE_CLOUD_LOCATION,
-    )
-
 _answer_llm = None
 _emotion_llm = None
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = SimpleEmbedder(dim=512)
+    return _embedding_model
 
 def get_answer_llm():
     global _answer_llm
     if _answer_llm is None:
-        _answer_llm = VertexAI(
-            model_name="gemini-1.5-flash",
-            project=GOOGLE_CLOUD_PROJECT,
-            location=GOOGLE_CLOUD_LOCATION,
-        )
+        if OllamaLLM is None:
+            raise RuntimeError("langchain_ollama OllamaLLM not available")
+        _answer_llm = OllamaLLM(model="llama3.2")
     return _answer_llm
 
 def get_emotion_llm():
     global _emotion_llm
     if _emotion_llm is None:
-        _emotion_llm = VertexAI(
-            model_name="gemini-1.5-flash",
-            project=GOOGLE_CLOUD_PROJECT,
-            location=GOOGLE_CLOUD_LOCATION,
-        )
+        if OllamaLLM is None:
+            raise RuntimeError("langchain_ollama OllamaLLM not available")
+        # we reuse same model; separate instance kept for logical parity with original
+        _emotion_llm = OllamaLLM(model="llama3.2")
     return _emotion_llm
+
+# ----------------------
+# Vector store import was attempted above
+# ----------------------
 
 # ----------------------
 # Globals
@@ -120,7 +142,11 @@ local_origins = [
     "http://127.0.0.1:5173",
 ] if allow_localhost else []
 
-allowed_origins = [netlify_origin] + extra_origins + local_origins
+allowed_origins = [o for o in [netlify_origin] if o] + extra_origins + local_origins
+if not allowed_origins:
+    # Fallback, but prefer explicit allowlist
+    allowed_origins = ["*"]
+
 log.info(f"🔐 CORS allow_origins = {allowed_origins}")
 
 app.add_middleware(
@@ -129,6 +155,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ----------------------
@@ -173,7 +200,7 @@ def health():
 def llm_health():
     try:
         txt = get_answer_llm().invoke("Say: Ok!").strip()
-        return {"ok": bool(txt), "model": "gemini-1.5-flash", "text": txt or "(empty)"}
+        return {"ok": bool(txt), "model": "llama3.2", "text": txt or "(empty)"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
