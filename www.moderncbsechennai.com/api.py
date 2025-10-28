@@ -14,18 +14,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+# OpenAI client
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
 # Attempt to import your vector loader; fallback to None
 try:
     from vector import load_vector_store
 except Exception as e:
     load_vector_store = None
-    # We'll log later when logger is available
-
-# Ollama LLM import
-try:
-    from langchain_ollama import OllamaLLM
-except Exception:
-    OllamaLLM = None
+    # We will log after logger is initialized
 
 # ======================
 # Logging / Debug
@@ -51,65 +51,148 @@ GOOGLE_CLOUD_LOCATION = env("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
 REFRESH_VECTORS_ON_STARTUP = env("REFRESH_VECTORS_ON_STARTUP", "true").lower() == "true"
 
 # ======================
-# Replacement for Vertex embeddings: deterministic lightweight embedder
+# OpenAI client setup
 # ======================
-class SimpleEmbedder:
-    """
-    Deterministic, lightweight embedding fallback.
-    Produces a fixed-length float vector from text using repeated SHA-256.
-    Not semantically strong but deterministic for similarity ranking fallback.
-    """
-    def __init__(self, dim: int = 512):
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if OpenAI is None:
+    log.error("OpenAI python package not available. Install `openai`.")
+    _openai_client = None
+else:
+    try:
+        # new OpenAI client usage
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        _openai_client = None
+        log.error(f"Failed to initialize OpenAI client: {e}")
+
+# ======================
+# Embedding & LLM wrappers (replace Vertex)
+# ======================
+class OpenAIEmbedder:
+    def __init__(self, client: "OpenAI", model: str = "text-embedding-3-small", dim: int = 512):
+        self.client = client
+        self.model = model
         self.dim = dim
 
     def embed_query(self, text: str):
-        if text is None:
+        if not text:
             return [0.0] * self.dim
-        # seed with text bytes
-        h = hashlib.sha256(text.encode("utf-8")).digest()
-        vec = []
-        prev = h
-        while len(vec) < self.dim:
-            prev = hashlib.sha256(prev).digest()
-            vec.extend([b / 255.0 for b in prev])
-        return vec[:self.dim]
+        if self.client is None:
+            # fallback deterministic hashing to vector
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = []
+            prev = h
+            while len(vec) < self.dim:
+                prev = hashlib.sha256(prev).digest()
+                vec.extend([b / 255.0 for b in prev])
+            return vec[:self.dim]
+        try:
+            # call OpenAI embeddings API
+            res = self.client.embeddings.create(model=self.model, input=text)
+            emb = res.data[0].embedding
+            return emb
+        except Exception as e:
+            log.warning(f"Embedding call failed: {e}; using fallback embedder.")
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = []
+            prev = h
+            while len(vec) < self.dim:
+                prev = hashlib.sha256(prev).digest()
+                vec.extend([b / 255.0 for b in prev])
+            return vec[:self.dim]
 
-# ----------------------
-# Ollama (llama3.2) setup
-# ----------------------
+class OpenAIChatLLM:
+    def __init__(self, client: "OpenAI", model: str = "gpt-4o-mini", system_prompt: str | None = None):
+        self.client = client
+        self.model = model
+        self.system_prompt = system_prompt or (
+            "You are Brightly, the official AI assistant of Modern Senior Secondary School, Chennai. "
+            "Answer in a concise, helpful, teacher-style manner."
+        )
+
+    def invoke(self, prompt: str, temperature: float = 0.2, max_tokens: int = 1024):
+        if self.client is None:
+            raise RuntimeError("OpenAI client not initialized")
+        try:
+            # Use the Chat Completions API via client.chat.completions.create
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            # New client returns choices with message content
+            content = ""
+            if resp and getattr(resp, "choices", None):
+                # handle different shapes robustly
+                choice = resp.choices[0]
+                # some clients provide message or delta
+                message = getattr(choice, "message", None)
+                if message and getattr(message, "content", None):
+                    content = message.content
+                else:
+                    # fallback to text or output_text
+                    content = getattr(choice, "text", "") or getattr(resp, "output_text", "") or ""
+            return content.strip()
+        except Exception as e:
+            raise
+
+# Emotion detection uses same chat model but short prompt
+class OpenAIEmotionLLM:
+    def __init__(self, client: "OpenAI", model: str = "gpt-4o-mini"):
+        self.client = client
+        self.model = model
+
+    def invoke(self, prompt: str):
+        if self.client is None:
+            raise RuntimeError("OpenAI client not initialized")
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=32,
+            )
+            content = ""
+            if resp and getattr(resp, "choices", None):
+                choice = resp.choices[0]
+                message = getattr(choice, "message", None)
+                if message and getattr(message, "content", None):
+                    content = message.content
+                else:
+                    content = getattr(choice, "text", "") or getattr(resp, "output_text", "") or ""
+            return content.strip()
+        except Exception as e:
+            raise
+
+# Lazy constructors for embedding and llms
+_embedding_model = None
 _answer_llm = None
 _emotion_llm = None
-_embedding_model = None
 
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        _embedding_model = SimpleEmbedder(dim=512)
+        _embedding_model = OpenAIEmbedder(client=_openai_client, model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"), dim=512)
     return _embedding_model
 
 def get_answer_llm():
     global _answer_llm
     if _answer_llm is None:
-        if OllamaLLM is None:
-            raise RuntimeError("langchain_ollama OllamaLLM not available")
-        _answer_llm = OllamaLLM(model="llama3.2")
+        _answer_llm = OpenAIChatLLM(client=_openai_client, model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
     return _answer_llm
 
 def get_emotion_llm():
     global _emotion_llm
     if _emotion_llm is None:
-        if OllamaLLM is None:
-            raise RuntimeError("langchain_ollama OllamaLLM not available")
-        # we reuse same model; separate instance kept for logical parity with original
-        _emotion_llm = OllamaLLM(model="llama3.2")
+        _emotion_llm = OpenAIEmotionLLM(client=_openai_client, model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
     return _emotion_llm
 
 # ----------------------
-# Vector store import was attempted above
-# ----------------------
-
-# ----------------------
-# Globals
+# Globals / state
 # ----------------------
 conversation_history = []
 session_memory = []
@@ -128,7 +211,7 @@ app = FastAPI(title="MSSS Backend", version="1.0.0")
 # ----------------------
 # CORS setup (Netlify + Local)
 # ----------------------
-netlify_origin = "https://modernschoolnanganallur.netlify.app"  # Your deployed frontend
+netlify_origin = os.getenv("NETLIFY_ORIGIN", "https://modernschoolnanganallur.netlify.app").rstrip("/")
 extra_origins = [
     o.strip().rstrip("/")
     for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",")
@@ -137,9 +220,9 @@ extra_origins = [
 allow_localhost = os.getenv("ALLOW_LOCALHOST", "true").lower() == "true"
 local_origins = [
     "http://localhost:3000",
-    "http://127.0.0.1:3000",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
 ] if allow_localhost else []
 
 allowed_origins = [o for o in [netlify_origin] if o] + extra_origins + local_origins
@@ -177,9 +260,6 @@ async def log_requests(request: Request, call_next):
         log.debug(f"⬅️  {request.method} {request.url.path} -> {response.status_code}")
     return response
 
-# ----------------------
-# Health + Root routes
-# ----------------------
 @app.get("/")
 def index():
     if os.path.exists("index.html"):
@@ -200,7 +280,7 @@ def health():
 def llm_health():
     try:
         txt = get_answer_llm().invoke("Say: Ok!").strip()
-        return {"ok": bool(txt), "model": "llama3.2", "text": txt or "(empty)"}
+        return {"ok": bool(txt), "model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"), "text": txt or "(empty)"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
@@ -497,6 +577,7 @@ def admin_refresh():
 # ======================
 # Ask endpoint
 # ======================
+
 @app.post("/ask")
 async def ask(query: Query):
     q_text = query.question.strip()
