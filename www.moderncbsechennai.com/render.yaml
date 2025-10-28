@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: mssschatbot
+    env: python
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+    startCommand: "./start.sh"
+    envVars:
+      - key: PORT
+        value: "10000"    # Render sets dynamic port; you can override or remove
+      - key: APP_MODULE
+        value: "api:app"
+    healthCheckPath: "/health"
+    autoDeploy: true
