@@ -1,7 +1,25 @@
 // ========= MAIN.JS (Netlify -> Cloud Run) =========
+import { sendMessage } from "./config.js";
+
+const chatBox = document.querySelector("#chatBox");
+const inputField = document.querySelector("#userInput");
+let chatHistory = [];
+
+document.querySelector("#sendBtn").addEventListener("click", async () => {
+  const userMessage = inputField.value.trim();
+  if (!userMessage) return;
+
+  chatBox.innerHTML += `<div class="user-msg">${userMessage}</div>`;
+  inputField.value = "";
+
+  const botReply = await sendMessage(userMessage, chatHistory);
+  chatBox.innerHTML += `<div class="bot-msg">${botReply}</div>`;
+  chatBox.scrollTop = chatBox.scrollHeight;
+});
 
 // 1) Use Netlify proxy. Your _redirects already points /api/* to Cloud Run.
-const API = "/api";
+const API = "https://chatbot-api-587062542199.asia-south1.run.app";
+
 
 // --- Small status banner so you can see connectivity at a glance
 (function ensureStatusBanner() {

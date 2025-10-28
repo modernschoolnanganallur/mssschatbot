@@ -211,24 +211,7 @@ app = FastAPI(title="MSSS Backend", version="1.0.0")
 # ----------------------
 # CORS setup (Netlify + Local)
 # ----------------------
-netlify_origin = os.getenv("NETLIFY_ORIGIN", "https://modernschoolnanganallur.netlify.app").rstrip("/")
-extra_origins = [
-    o.strip().rstrip("/")
-    for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",")
-    if o.strip()
-]
-allow_localhost = os.getenv("ALLOW_LOCALHOST", "true").lower() == "true"
-local_origins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-] if allow_localhost else []
-
-allowed_origins = [o for o in [netlify_origin] if o] + extra_origins + local_origins
-if not allowed_origins:
-    # Fallback, but prefer explicit allowlist
-    allowed_origins = ["*"]
+allowed_origins = ["https://modernschooltesting.netlify.app"]
 
 log.info(f"🔐 CORS allow_origins = {allowed_origins}")
 
@@ -498,7 +481,7 @@ def refresh_vector_stores():
     }
     for name, file in current_files.items():
         try:
-            retriever = load_vector_store(file)
+            retriever = load_vector_store() # Assuming load_vector_store no longer takes a path
             if retriever:
                 vector_stores[name] = retriever
         except Exception as e:
@@ -544,7 +527,7 @@ def load_ncert_vectors():
     for name, path in NCERT_DATASETS.items():
         if os.path.exists(path):
             try:
-                retriever = load_vector_store(path)
+                retriever = load_vector_store() # Assuming load_vector_store no longer takes a path
                 if retriever:
                     vector_stores[name] = retriever
                     loaded.append(name)
@@ -757,8 +740,9 @@ def startup_event():
     log.info(f"   Project = {GOOGLE_CLOUD_PROJECT}")
     log.info(f"   Location = {GOOGLE_CLOUD_LOCATION}")
     log.info(f"   Refresh vectors on startup = {REFRESH_VECTORS_ON_STARTUP}")
+    netlify_origin = os.getenv("NETLIFY_ORIGIN", "")
     if netlify_origin:
-        log.info(f"   NETLIFY_ORIGIN = {netlify_origin}")
+        log.info(f"NETLIFY_ORIGIN = {netlify_origin}")
     cleanup_old_sessions(max_files=10)
 
     if REFRESH_VECTORS_ON_STARTUP:

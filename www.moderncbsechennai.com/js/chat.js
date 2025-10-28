@@ -2,18 +2,17 @@
 
 window.addEventListener("DOMContentLoaded", () => {
   // ---- Config / Base URL --------------------------------------------------
-  // Prefer API_BASE from js/config.js; otherwise fall back to Netlify proxy (/api)
-  const API =
-    typeof API_BASE !== "undefined" && API_BASE
-      ? API_BASE.replace(/\/+$/, "") // trim trailing slash
-      : "/api";
+  // Prefer API from js/config.js; otherwise fall back to Netlify proxy (/api)
+const API = "https://chatbot-api-587062542199.asia-south1.run.app";
+console.log("[chat.js] Using Cloud Run API:", API);
 
-  if (typeof API_BASE === "undefined") {
+
+  if (typeof API === "undefined") {
     console.warn(
-      "[chat.js] API_BASE not found; using fallback:", API
+      "[chat.js] API not found; using fallback:", API
     );
   } else {
-    console.log("[chat.js] Using API_BASE:", API);
+    console.log("[chat.js] Using API:", API);
   }
 
   // ---- DOM refs -----------------------------------------------------------
