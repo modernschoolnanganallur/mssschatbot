@@ -26,7 +26,7 @@ log = logging.getLogger("msss")
 # ----------------------
 # Defaults for your deployment (can be overridden by env)
 # ----------------------
-DEFAULT_PROJECT = "vertex-ai-search-rag-project"
+DEFAULT_PROJECT = "modernschoolnanganallurChatbot"
 DEFAULT_LOCATION = "asia-south1"
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -37,7 +37,15 @@ GOOGLE_CLOUD_LOCATION = env("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
 REFRESH_VECTORS_ON_STARTUP = env("REFRESH_VECTORS_ON_STARTUP", "true").lower() == "true"
 
 # ----------------------
-# Vector store (lazy; app still boots if file missing)
+# Vertex AI setup
+# ----------------------
+try:
+    from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
+except Exception as e:
+    log.error(f"❌ VertexAI import failed: {e}")
+
+# ----------------------
+# Vector store import
 # ----------------------
 try:
     from vector import load_vector_store
@@ -45,14 +53,10 @@ except Exception as e:
     load_vector_store = None
     log.info(f"ℹ️ vector.py not available or failed to import: {e}")
 
-# LangChain + Vertex AI (lazy constructors below prevent init at import time)
-from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
-
 # ----------------------
-# Helpers: lazy constructors
+# Lazy constructors
 # ----------------------
 def get_embedding_model():
-    """Vertex embeddings for memory similarity search."""
     return VertexAIEmbeddings(
         model_name="text-embedding-004",
         project=GOOGLE_CLOUD_PROJECT,
@@ -83,7 +87,7 @@ def get_emotion_llm():
     return _emotion_llm
 
 # ----------------------
-# Globals / state
+# Globals
 # ----------------------
 conversation_history = []
 session_memory = []
@@ -99,8 +103,10 @@ for _d in ("img", "css", "dist"):
 # ======================
 app = FastAPI(title="MSSS Backend", version="1.0.0")
 
-# CORS: lock to Netlify origin (+ optional local dev)
-netlify_origin = os.getenv("NETLIFY_ORIGIN", "").rstrip("/")
+# ----------------------
+# CORS setup (Netlify + Local)
+# ----------------------
+netlify_origin = "https://modernschoolnanganallur.netlify.app"  # Your deployed frontend
 extra_origins = [
     o.strip().rstrip("/")
     for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",")
@@ -109,16 +115,12 @@ extra_origins = [
 allow_localhost = os.getenv("ALLOW_LOCALHOST", "true").lower() == "true"
 local_origins = [
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
 ] if allow_localhost else []
 
-allowed_origins = [o for o in [netlify_origin] if o] + extra_origins + local_origins
-if not allowed_origins:
-    # Fallback, but prefer explicit allowlist
-    allowed_origins = ["*"]
-
+allowed_origins = [netlify_origin] + extra_origins + local_origins
 log.info(f"🔐 CORS allow_origins = {allowed_origins}")
 
 app.add_middleware(
@@ -127,10 +129,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
-# Static mounts (if present)
+# ----------------------
+# Static mounts
+# ----------------------
 if os.path.isdir("img"):
     app.mount("/img", StaticFiles(directory="img"), name="img")
 if os.path.isdir("css"):
@@ -147,6 +150,9 @@ async def log_requests(request: Request, call_next):
         log.debug(f"⬅️  {request.method} {request.url.path} -> {response.status_code}")
     return response
 
+# ----------------------
+# Health + Root routes
+# ----------------------
 @app.get("/")
 def index():
     if os.path.exists("index.html"):
@@ -165,9 +171,6 @@ def health():
 
 @app.get("/llm/health")
 def llm_health():
-    """
-    Quick Vertex AI ping to confirm model access.
-    """
     try:
         txt = get_answer_llm().invoke("Say: Ok!").strip()
         return {"ok": bool(txt), "model": "gemini-1.5-flash", "text": txt or "(empty)"}
