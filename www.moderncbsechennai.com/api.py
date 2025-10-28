@@ -7,6 +7,7 @@ import random
 import logging
 import hashlib
 from datetime import datetime
+from typing import Optional, List
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,22 +15,21 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-# OpenAI client
+# Try to import vector loader from your repo (must exist)
+try:
+    from vector import load_vector_store
+except Exception:
+    load_vector_store = None
+
+# Try to import OpenAI new client
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-# Attempt to import your vector loader; fallback to None
-try:
-    from vector import load_vector_store
-except Exception as e:
-    load_vector_store = None
-    # We will log after logger is initialized
-
-# ======================
-# Logging / Debug
-# ======================
+# ----------------------
+# Logging / debug
+# ----------------------
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
@@ -38,137 +38,81 @@ logging.basicConfig(
 log = logging.getLogger("msss")
 
 # ----------------------
-# Defaults for your deployment (can be overridden by env)
+# Config / env
 # ----------------------
-DEFAULT_PROJECT = "modernschoolnanganallurChatbot"
-DEFAULT_LOCATION = "asia-south1"
-
-def env(name: str, default: str | None = None) -> str | None:
-    return os.getenv(name, default)
-
-GOOGLE_CLOUD_PROJECT = env("GOOGLE_CLOUD_PROJECT", DEFAULT_PROJECT)
-GOOGLE_CLOUD_LOCATION = env("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
-REFRESH_VECTORS_ON_STARTUP = env("REFRESH_VECTORS_ON_STARTUP", "true").lower() == "true"
-
-# ======================
-# OpenAI client setup
-# ======================
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "modernschoolnanganallurchatbot")
+LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "asia-south1")
+REFRESH_VECTORS_ON_STARTUP = os.getenv("REFRESH_VECTORS_ON_STARTUP", "true").lower() == "true"
+NETLIFY_ORIGIN = os.getenv("NETLIFY_ORIGIN", "https://modernschoolnanganallur.netlify.app").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if OpenAI is None:
-    log.error("OpenAI python package not available. Install `openai`.")
-    _openai_client = None
-else:
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+# ----------------------
+# OpenAI client wrappers
+# ----------------------
+_openai_client = None
+if OpenAI is not None and OPENAI_API_KEY:
     try:
-        # new OpenAI client usage
         _openai_client = OpenAI(api_key=OPENAI_API_KEY)
     except Exception as e:
+        log.error("OpenAI client init failed: %s", e)
         _openai_client = None
-        log.error(f"Failed to initialize OpenAI client: {e}")
+else:
+    if OpenAI is None:
+        log.warning("openai package not installed; embedding/llm calls will fallback.")
+    elif not OPENAI_API_KEY:
+        log.warning("OPENAI_API_KEY not set; embedding/llm calls will fallback.")
 
-# ======================
-# Embedding & LLM wrappers (replace Vertex)
-# ======================
-class OpenAIEmbedder:
-    def __init__(self, client: "OpenAI", model: str = "text-embedding-3-small", dim: int = 512):
-        self.client = client
-        self.model = model
+class FallbackEmbedder:
+    def __init__(self, dim: int = 512):
         self.dim = dim
-
     def embed_query(self, text: str):
         if not text:
             return [0.0] * self.dim
-        if self.client is None:
-            # fallback deterministic hashing to vector
-            h = hashlib.sha256(text.encode("utf-8")).digest()
-            vec = []
-            prev = h
-            while len(vec) < self.dim:
-                prev = hashlib.sha256(prev).digest()
-                vec.extend([b / 255.0 for b in prev])
-            return vec[:self.dim]
-        try:
-            # call OpenAI embeddings API
-            res = self.client.embeddings.create(model=self.model, input=text)
-            emb = res.data[0].embedding
-            return emb
-        except Exception as e:
-            log.warning(f"Embedding call failed: {e}; using fallback embedder.")
-            h = hashlib.sha256(text.encode("utf-8")).digest()
-            vec = []
-            prev = h
-            while len(vec) < self.dim:
-                prev = hashlib.sha256(prev).digest()
-                vec.extend([b / 255.0 for b in prev])
-            return vec[:self.dim]
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        vec = []
+        prev = h
+        while len(vec) < self.dim:
+            prev = hashlib.sha256(prev).digest()
+            vec.extend([b / 255.0 for b in prev])
+        return vec[:self.dim]
 
-class OpenAIChatLLM:
-    def __init__(self, client: "OpenAI", model: str = "gpt-4o-mini", system_prompt: str | None = None):
+class OpenAIEmbedder:
+    def __init__(self, client, model=OPENAI_EMBEDDING_MODEL, dim: int = 1536):
         self.client = client
         self.model = model
-        self.system_prompt = system_prompt or (
-            "You are Brightly, the official AI assistant of Modern Senior Secondary School, Chennai. "
-            "Answer in a concise, helpful, teacher-style manner."
-        )
+        self.dim = dim
+    def embed_query(self, text: str):
+        if not self.client:
+            return FallbackEmbedder(self.dim).embed_query(text)
+        resp = self.client.embeddings.create(model=self.model, input=text)
+        return resp.data[0].embedding
 
+class OpenAIChat:
+    def __init__(self, client, model=OPENAI_CHAT_MODEL, system_prompt: Optional[str]=None):
+        self.client = client
+        self.model = model
+        self.system_prompt = system_prompt or ("You are Brightly, the official AI assistant for Modern Senior Secondary School, Chennai. "
+                                               "Answer concisely in teacher-style English; prefer short steps for math solutions.")
     def invoke(self, prompt: str, temperature: float = 0.2, max_tokens: int = 1024):
-        if self.client is None:
-            raise RuntimeError("OpenAI client not initialized")
-        try:
-            # Use the Chat Completions API via client.chat.completions.create
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            # New client returns choices with message content
-            content = ""
-            if resp and getattr(resp, "choices", None):
-                # handle different shapes robustly
-                choice = resp.choices[0]
-                # some clients provide message or delta
-                message = getattr(choice, "message", None)
-                if message and getattr(message, "content", None):
-                    content = message.content
-                else:
-                    # fallback to text or output_text
-                    content = getattr(choice, "text", "") or getattr(resp, "output_text", "") or ""
-            return content.strip()
-        except Exception as e:
-            raise
+        if not self.client:
+            raise RuntimeError("OpenAI client not available")
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": self.system_prompt},
+                      {"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        # robust extraction
+        choice = resp.choices[0]
+        msg = getattr(choice, "message", None)
+        if msg and getattr(msg, "content", None):
+            return msg.content.strip()
+        return (getattr(choice, "text", "") or getattr(resp, "output_text", "") or "").strip()
 
-# Emotion detection uses same chat model but short prompt
-class OpenAIEmotionLLM:
-    def __init__(self, client: "OpenAI", model: str = "gpt-4o-mini"):
-        self.client = client
-        self.model = model
-
-    def invoke(self, prompt: str):
-        if self.client is None:
-            raise RuntimeError("OpenAI client not initialized")
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=32,
-            )
-            content = ""
-            if resp and getattr(resp, "choices", None):
-                choice = resp.choices[0]
-                message = getattr(choice, "message", None)
-                if message and getattr(message, "content", None):
-                    content = message.content
-                else:
-                    content = getattr(choice, "text", "") or getattr(resp, "output_text", "") or ""
-            return content.strip()
-        except Exception as e:
-            raise
-
-# Lazy constructors for embedding and llms
+# Lazy singletons
 _embedding_model = None
 _answer_llm = None
 _emotion_llm = None
@@ -176,61 +120,44 @@ _emotion_llm = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        _embedding_model = OpenAIEmbedder(client=_openai_client, model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"), dim=512)
+        if _openai_client:
+            _embedding_model = OpenAIEmbedder(_openai_client)
+        else:
+            _embedding_model = FallbackEmbedder(dim=512)
     return _embedding_model
 
 def get_answer_llm():
     global _answer_llm
     if _answer_llm is None:
-        _answer_llm = OpenAIChatLLM(client=_openai_client, model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
+        if _openai_client:
+            _answer_llm = OpenAIChat(_openai_client)
+        else:
+            _answer_llm = None
     return _answer_llm
 
 def get_emotion_llm():
     global _emotion_llm
     if _emotion_llm is None:
-        _emotion_llm = OpenAIEmotionLLM(client=_openai_client, model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
+        if _openai_client:
+            _emotion_llm = OpenAIChat(_openai_client)
+        else:
+            _emotion_llm = None
     return _emotion_llm
 
 # ----------------------
-# Globals / state
+# App + CORS + Static
 # ----------------------
-conversation_history = []
-session_memory = []
-vector_stores = {}
+app = FastAPI(title="MSSS Backend", version="1.0")
 
-os.makedirs("vectorstore", exist_ok=True)
-os.makedirs("sessions", exist_ok=True)
-for _d in ("img", "css", "dist"):
-    os.makedirs(_d, exist_ok=True)
-
-# ======================
-# FastAPI app + CORS
-# ======================
-app = FastAPI(title="MSSS Backend", version="1.0.0")
-
-# ----------------------
-# CORS setup (Netlify + Local)
-# ----------------------
-netlify_origin = os.getenv("NETLIFY_ORIGIN", "https://modernschoolnanganallur.netlify.app").rstrip("/")
-extra_origins = [
-    o.strip().rstrip("/")
-    for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",")
-    if o.strip()
-]
-allow_localhost = os.getenv("ALLOW_LOCALHOST", "true").lower() == "true"
-local_origins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-] if allow_localhost else []
-
-allowed_origins = [o for o in [netlify_origin] if o] + extra_origins + local_origins
+allowed_origins = [NETLIFY_ORIGIN] if NETLIFY_ORIGIN else []
+if os.getenv("ALLOW_LOCALHOST", "true").lower() == "true":
+    allowed_origins += ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+extra = [o.strip() for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",") if o.strip()]
+allowed_origins += extra
 if not allowed_origins:
-    # Fallback, but prefer explicit allowlist
     allowed_origins = ["*"]
 
-log.info(f"🔐 CORS allow_origins = {allowed_origins}")
+log.info("CORS allowed origins: %s", allowed_origins)
 
 app.add_middleware(
     CORSMiddleware,
@@ -238,36 +165,216 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
-# ----------------------
-# Static mounts
-# ----------------------
-if os.path.isdir("img"):
-    app.mount("/img", StaticFiles(directory="img"), name="img")
-if os.path.isdir("css"):
-    app.mount("/css", StaticFiles(directory="css"), name="css")
-if os.path.isdir("dist"):
-    app.mount("/dist", StaticFiles(directory="dist"), name="dist")
+for d in ("img", "css", "dist"):
+    if os.path.isdir(d):
+        app.mount(f"/{d}", StaticFiles(directory=d), name=d)
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    if DEBUG:
-        log.debug(f"➡️  {request.method} {request.url.path}")
-    response = await call_next(request)
-    if DEBUG:
-        log.debug(f"⬅️  {request.method} {request.url.path} -> {response.status_code}")
-    return response
+# ----------------------
+# State / persistence
+# ----------------------
+conversation_history: List[dict] = []
+session_memory: List[dict] = []
+vector_stores = {}
 
+os.makedirs("vectorstore", exist_ok=True)
+os.makedirs("sessions", exist_ok=True)
+
+# ----------------------
+# Helpers (math, memory, vector)
+# ----------------------
+def solve_math_expression(expr: str):
+    try:
+        import sympy as sp
+        expr_clean = expr.lower().replace("^", "**").replace("×", "*").replace("÷", "/").strip()
+        x = sp.symbols("x")
+        # simple equations
+        if "=" in expr_clean:
+            lhs, rhs = expr_clean.split("=", 1)
+            sol = sp.solve(sp.sympify(lhs) - sp.sympify(rhs), x)
+            if not sol:
+                return "No real solution found."
+            if len(sol) == 1:
+                return f"The value of x is {sol[0]}"
+            return f"Possible values of x are: {', '.join(map(str, sol))}"
+        # numeric eval fallback (guarded)
+        allowed = {"sqrt": math.sqrt, "log": math.log10, "ln": math.log, "pi": math.pi, "e": math.e, "pow": pow}
+        result = eval(expr_clean, {"__builtins__": None}, allowed)
+        return f"The result is {round(result,6) if isinstance(result, float) else result}"
+    except Exception as e:
+        log.warning("Math eval error: %s", e)
+        return None
+
+def explain_math_step_by_step(expr: str):
+    try:
+        import sympy as sp
+        x = sp.symbols("x")
+        s = expr.lower().replace("^", "**").replace("×", "*")
+        if "differentiate" in s or "derivative" in s:
+            target = s.split("of")[-1].strip()
+            func = sp.sympify(target)
+            return f"The derivative of {func} wrt x is {sp.diff(func, x)}"
+        if "integrate" in s:
+            target = s.split("of")[-1].strip()
+            func = sp.sympify(target)
+            return f"The integral is {sp.integrate(func, x)} + C"
+        if "=" in s:
+            lhs, rhs = s.split("=", 1)
+            sol = sp.solve(sp.sympify(lhs) - sp.sympify(rhs), x)
+            return f"Solved: {sol}"
+        return f"Simplified: {sp.simplify(s)}"
+    except Exception:
+        return None
+
+def add_to_memory(question: str, answer: str):
+    try:
+        embed = get_embedding_model().embed_query(question)
+    except Exception as e:
+        log.warning("Embedding failed: %s", e)
+        embed = None
+    session_memory.append({"question": question, "answer": answer, "embedding": embed})
+
+def retrieve_relevant_memory(question: str, top_n: int = 5):
+    try:
+        q_emb = get_embedding_model().embed_query(question)
+    except Exception as e:
+        log.warning("Embedding error: %s", e)
+        return ""
+    if not session_memory:
+        return ""
+    def cosine(a,b):
+        if not a or not b:
+            return 0
+        dot = sum(x*y for x,y in zip(a,b))
+        na = math.sqrt(sum(x*x for x in a))
+        nb = math.sqrt(sum(y*y for y in b))
+        if na==0 or nb==0:
+            return 0
+        return dot/(na*nb)
+    scored = []
+    for e in session_memory:
+        score = cosine(q_emb, e.get("embedding"))
+        scored.append((score, e))
+    scored.sort(reverse=True, key=lambda x: x[0])
+    top = [f"Q: {it['question']}\nA: {it['answer']}" for _, it in scored[:top_n]]
+    return "\n".join(top)
+
+def safe_retrieve(retriever, query: str):
+    if retriever is None:
+        return []
+    try:
+        if hasattr(retriever, "get_relevant_documents"):
+            return retriever.get_relevant_documents(query)
+        if hasattr(retriever, "similarity_search"):
+            return retriever.similarity_search(query)
+        return []
+    except Exception as e:
+        log.warning("Retriever error: %s", e)
+        return []
+
+# ----------------------
+# Greetings / intents
+# ----------------------
+GREETINGS = ["hello","hi","hey","good morning","good afternoon","good evening"]
+FAREWELLS = ["bye","goodbye","see you","farewell"]
+INTENT_MAP = {
+    "fees": ["fee","fees","structure","tuition"],
+    "staff": ["principal","teacher","staff"],
+    "address": ["address","location","contact"],
+    "self_identity": ["who are you","your name","what are you","who created you"],
+}
+
+def check_greeting(q: str):
+    ql = q.lower()
+    if any(g in ql for g in GREETINGS):
+        return "Welcome to Modern Senior Secondary School! I'm Brightly, your assistant. How can I help you today?"
+    return None
+
+def check_farewell(q: str):
+    ql = q.lower()
+    if any(f in ql for f in FAREWELLS):
+        return "Goodbye! Have a great day 🌟 Come back soon!"
+    return None
+
+def detect_emotion(user_input: str):
+    factual = ["what","where","when","how","who","which","fee","fees","address","location","principal","teacher","school","exam","contact","number","subject","student","class","admission"]
+    if any(re.search(rf"\b{kw}\b", user_input.lower()) for kw in factual):
+        return None
+    if any(e in user_input for e in ["💡","😊","😄","🎉","🥳"]):
+        return None
+    prompt = f"Detect if this message is Positive / Negative / Neutral. Return one word.\nMessage: {user_input}"
+    try:
+        resp = get_emotion_llm().invoke(prompt).strip().capitalize() if get_emotion_llm() else None
+        if resp == "Positive":
+            return random.choice([
+                "That's really kind of you, thank you 😊",
+                "Glad to hear that! You're awesome!",
+                "That made my day 😄",
+            ])
+        if resp == "Negative":
+            return "I'm sorry if something felt off. Let's fix it."
+    except Exception as e:
+        log.warning("Emotion detect error: %s", e)
+    return None
+
+# ----------------------
+# Vector store helpers
+# ----------------------
+def refresh_vector_stores():
+    global vector_stores
+    vector_stores = {}
+    if load_vector_store is None:
+        log.info("No vector.load_vector_store available; skipping vector build.")
+        return
+    data_dir = "data"
+    if not os.path.isdir(data_dir):
+        log.info("No data directory present; skipping vector build.")
+        return
+    for f in os.listdir(data_dir):
+        if f.endswith(".txt"):
+            path = os.path.join(data_dir, f)
+            try:
+                retr = load_vector_store(path)
+                if retr:
+                    vector_stores[os.path.splitext(f)[0]] = retr
+            except Exception as e:
+                log.warning("Failed to load vector %s: %s", path, e)
+    log.info("Vector stores loaded: %s", list(vector_stores.keys()))
+
+def load_ncert_vectors():
+    # optional: attempts to load specific files if present
+    datasets = {
+        "ncert_maths": "data/ncert_maths.txt",
+        "ncert_physics": "data/ncert_physics.txt",
+        "ncert_chemistry": "data/ncert_chemistry.txt",
+    }
+    for name, path in datasets.items():
+        if os.path.exists(path) and load_vector_store:
+            try:
+                retr = load_vector_store(path)
+                if retr:
+                    vector_stores[name] = retr
+            except Exception as e:
+                log.warning("Failed to load %s: %s", name, e)
+
+# ----------------------
+# Schemas
+# ----------------------
+class Query(BaseModel):
+    question: str
+
+# ----------------------
+# Routes: health / root
+# ----------------------
 @app.get("/")
 def index():
     if os.path.exists("index.html"):
         return FileResponse("index.html")
     return JSONResponse({
         "message": "Modern Senior Secondary School — API online",
-        "project": GOOGLE_CLOUD_PROJECT,
-        "location": GOOGLE_CLOUD_LOCATION,
+        "project": PROJECT_ID,
+        "location": LOCATION,
         "vectors_refreshed_on_startup": REFRESH_VECTORS_ON_STARTUP
     })
 
@@ -279,329 +386,41 @@ def health():
 @app.get("/llm/health")
 def llm_health():
     try:
-        txt = get_answer_llm().invoke("Say: Ok!").strip()
-        return {"ok": bool(txt), "model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"), "text": txt or "(empty)"}
+        llm = get_answer_llm()
+        if llm is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "LLM not configured"})
+        txt = llm.invoke("Say: Ok!").strip()
+        return {"ok": bool(txt), "model": OPENAI_CHAT_MODEL}
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 @app.post("/chat")
 async def chat(payload: dict):
+    # legacy echo endpoint used earlier
     msg = payload.get("message", "")
     return {"reply": f"Echo: {msg}"}
-
-# ======================
-# Math utilities
-# ======================
-def solve_math_expression(expr: str):
-    """
-    Degree-based trig; simple equation solving with SymPy; safe eval sandbox.
-    """
-    try:
-        import sympy as sp
-
-        expr = (
-            expr.lower()
-            .replace("^", "**")
-            .replace("×", "*")
-            .replace("÷", "/")
-            .strip()
-        )
-
-        x, y, z = sp.symbols("x y z")
-        allowed = {
-            "sin": lambda deg: math.sin(math.radians(float(deg))),
-            "cos": lambda deg: math.cos(math.radians(float(deg))),
-            "tan": lambda deg: math.tan(math.radians(float(deg))),
-            "asin": lambda val: math.degrees(math.asin(float(val))),
-            "acos": lambda val: math.degrees(math.acos(float(val))),
-            "atan": lambda val: math.degrees(math.atan(float(val))),
-            "sqrt": math.sqrt,
-            "log": math.log10,
-            "ln": math.log,
-            "pi": math.pi,
-            "e": math.e,
-            "pow": pow,
-        }
-
-        if "=" in expr:
-            lhs, rhs = expr.split("=")
-            solution = sp.solve(sp.sympify(lhs) - sp.sympify(rhs), x)
-            if not solution:
-                return "No real solution found."
-            if len(solution) == 1:
-                return f"The value of x is {solution[0]}."
-            return f"Possible values of x are: {', '.join(map(str, solution))}."
-
-        try:
-            simplified = sp.simplify(expr)
-            if str(simplified) != expr:
-                expr = str(simplified)
-        except Exception:
-            pass
-
-        result = eval(expr, {"__builtins__": None}, allowed)  # guarded
-        if isinstance(result, float):
-            result = round(result, 6)
-        return f"The result is {result}"
-
-    except Exception as e:
-        log.warning(f"⚠️ Math solver error: {e}")
-        return None
-
-
-def explain_math_step_by_step(expr: str):
-    import sympy as sp
-    x, y, z = sp.symbols("x y z")
-    try:
-        expr = expr.lower().replace("^", "**").replace("×", "*")
-        if ("differentiate" in expr) or ("derivative" in expr) or ("find dy/dx" in expr):
-            target = expr.split("of")[-1].strip()
-            func = sp.sympify(target)
-            result = sp.diff(func, x)
-            return f"The derivative of {func} with respect to x is: {result}"
-        elif ("integrate" in expr) or ("integration" in expr):
-            target = expr.split("of")[-1].strip()
-            func = sp.sympify(target)
-            result = sp.integrate(func, x)
-            return f"The integral of {func} with respect to x is: {result} + C"
-        elif "=" in expr:
-            lhs, rhs = expr.split("=")
-            solution = sp.solve(sp.sympify(lhs) - sp.sympify(rhs), x)
-            steps = [
-                f"Step 1️⃣: Start with {lhs} = {rhs}",
-                f"Step 2️⃣: Move all terms to one side: ({lhs}) - ({rhs}) = 0",
-                f"Step 3️⃣: Simplify and solve for x",
-                f"✅ Solution: x = {solution}",
-            ]
-            return "\n".join(steps)
-        else:
-            simplified = sp.simplify(expr)
-            return f"Simplified form: {simplified}"
-    except Exception:
-        return None
-
-# ======================
-# Memory helpers
-# ======================
-def add_to_memory(question: str, answer: str):
-    try:
-        embed = get_embedding_model().embed_query(question)
-    except Exception as e:
-        log.warning(f"⚠️ Embedding error: {e}")
-        embed = None
-    session_memory.append({"question": question, "answer": answer, "embedding": embed})
-
-def retrieve_relevant_memory(question: str, top_n=5):
-    try:
-        query_embed = get_embedding_model().embed_query(question)
-    except Exception as e:
-        log.warning(f"⚠️ Embedding error: {e}")
-        return ""
-
-    if not session_memory:
-        return ""
-
-    def cosine_similarity(a, b):
-        if a is None or b is None:
-            return 0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = sum(x * x for x in a) ** 0.5
-        norm_b = sum(y * y for y in b) ** 0.5
-        if norm_a == 0 or norm_b == 0:
-            return 0
-        return dot / (norm_a * norm_b)
-
-    scored = []
-    for entry in session_memory:
-        score = cosine_similarity(query_embed, entry["embedding"])
-        scored.append((score, entry))
-
-    scored.sort(reverse=True, key=lambda x: x[0])
-    top_entries = [f"Q: {e['question']}\nA: {e['answer']}" for _, e in scored[:top_n]]
-    return "\n".join(top_entries)
-
-# ======================
-# Greetings / Farewells / Emotion
-# ======================
-GREETINGS = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"]
-FAREWELLS = ["bye", "goodbye", "see you", "farewell"]
-
-def check_greeting(q: str):
-    q = q.lower()
-    if any(g in q for g in GREETINGS):
-        return ("Welcome to Modern Senior Secondary School! I'm Brightly, your assistant. "
-                "How can I help you today?")
-    return None
-
-def check_farewell(q: str):
-    q = q.lower()
-    if any(f in q for f in FAREWELLS):
-        return "Goodbye! Have a great day 🌟 Come back soon!"
-    return None
-
-def detect_emotion(user_input: str):
-    factual_keywords = [
-        "what","where","when","how","who","which","fee","fees","address","location",
-        "principal","teacher","school","exam","contact","number","subject","student",
-        "class","admission",
-    ]
-    if any(re.search(rf"\b{kw}\b", user_input.lower()) for kw in factual_keywords):
-        return None
-    if any(emoji in user_input for emoji in ["💡", "😊", "😄", "🎉", "🥳"]):
-        return None
-    prompt = f"""
-Detect if this message is Positive (appreciation/humor) or Negative (complaint/anger).
-Return only: Positive / Negative / Neutral
-Message: {user_input}
-"""
-    try:
-        resp = get_emotion_llm().invoke(prompt).strip().capitalize()
-        if resp == "Positive":
-            responses = [
-                "That's really kind of you, thank you 😊",
-                "Glad to hear that! You're awesome!",
-                "That made my day 😄",
-                "You're too sweet — thanks a lot!",
-                "Aww, I appreciate that 💫",
-            ]
-            return random.choice(responses)
-        elif resp == "Negative":
-            return "I'm sorry if something felt off. Let’s fix it together."
-    except Exception as e:
-        log.warning(f"⚠️ Emotion detection error: {e}")
-    return None
-
-# ======================
-# Intent & Vector Stores
-# ======================
-INTENT_MAP = {
-    "fees": ["fee", "fees", "structure", "tuition"],
-    "staff": ["principal", "teacher", "staff"],
-    "address": ["address", "location", "contact"],
-    "self_identity": ["who are you", "your name", "what are you", "who created you"],
-}
-
-def refresh_vector_stores():
-    """Build retrievers from all .txt files in ./data (if present)."""
-    global vector_stores
-    vector_stores = {}
-    if load_vector_store is None:
-        log.info("ℹ️ load_vector_store unavailable; skipping vector build.")
-        return
-    if not os.path.isdir("data"):
-        log.info("ℹ️ No data directory found; skipping vector build.")
-        return
-    current_files = {
-        os.path.splitext(f)[0]: os.path.join("data", f)
-        for f in os.listdir("data")
-        if f.endswith(".txt")
-    }
-    for name, file in current_files.items():
-        try:
-            retriever = load_vector_store(file)
-            if retriever:
-                vector_stores[name] = retriever
-        except Exception as e:
-            log.warning(f"⚠️ Failed to build retriever for '{file}': {e}")
-    log.info(f"✅ Vector stores loaded: {list(vector_stores.keys())}")
-
-# ======================
-# Misc helpers
-# ======================
-def split_subquestions(q: str):
-    if not any(sep in q.lower() for sep in [" and ", ";", "?"]):
-        return [q.strip()]
-    return [s.strip() for s in re.split(r"[?;]| and ", q) if s.strip()]
-
-CLASS_MAP = {
-    "lkg": "LKG", "ukg": "UKG", "1st": "I", "first": "I", "i": "I",
-    "2nd": "II", "second": "II", "3rd": "III", "third": "III",
-    "4th": "IV", "5th": "V", "6th": "VI", "7th": "VII", "8th": "VIII",
-    "9th": "IX", "10th": "X", "tenth": "X",
-    "11th cs": "XI-CS", "11th bio": "XI-BIO", "11th comm": "XI-COMM",
-    "12th cs": "XII-CS", "12th bio": "XII-BIO", "12th comm": "XII-COMM",
-}
-
-def safe_retrieve(retriever, query):
-    if hasattr(retriever, "get_relevant_documents"):
-        return retriever.get_relevant_documents(query)
-    return retriever._get_relevant_documents(query, run_manager=None)
-
-# ======================
-# NCERT optional datasets (if present)
-# ======================
-NCERT_DATASETS = {
-    "ncert_maths": "data/ncert_maths.txt",
-    "ncert_physics": "data/ncert_physics.txt",
-    "ncert_chemistry": "data/ncert_chemistry.txt",
-}
-
-def load_ncert_vectors():
-    if load_vector_store is None:
-        log.info("ℹ️ load_vector_store unavailable; skipping NCERT.")
-        return
-    loaded = []
-    for name, path in NCERT_DATASETS.items():
-        if os.path.exists(path):
-            try:
-                retriever = load_vector_store(path)
-                if retriever:
-                    vector_stores[name] = retriever
-                    loaded.append(name)
-            except Exception as e:
-                log.warning(f"⚠️ Failed to load NCERT '{name}': {e}")
-    log.info(f"📘 NCERT datasets loaded: {loaded}")
-
-# ======================
-# Schemas
-# ======================
-class Query(BaseModel):
-    question: str
-
-# ======================
-# Admin
-# ======================
-@app.post("/admin/refresh")
-def admin_refresh():
-    try:
-        refresh_vector_stores()
-        load_ncert_vectors()
-        return {
-            "ok": True,
-            "message": "Vectors refreshed",
-            "stores": list(vector_stores.keys()),
-        }
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
-
-# ======================
-# Ask endpoint
-# ======================
 
 @app.post("/ask")
 async def ask(query: Query):
     q_text = query.question.strip()
     final_answers = []
 
-    math_regex = re.compile(
-        r"d/dx|dx|differentiate|derive|integrate|roots|equation|simplify|sin|cos|tan|log|sqrt|=|[\d+\-*/^()]"
-    )
+    math_regex = re.compile(r"d/dx|dx|differentiate|derive|integrate|roots|equation|simplify|sin|cos|tan|log|sqrt|=|[\d+\-*/^()]")
 
-    # 1) Math / Science direct
+    # 1) math direct
     if math_regex.search(q_text):
-        step_result = explain_math_step_by_step(q_text)
-        if step_result:
-            add_to_memory(q_text, step_result)
-            conversation_history.append({"question": q_text, "answer": step_result})
-            return JSONResponse({"answer": step_result, "history": conversation_history})
+        step = explain_math_step_by_step(q_text)
+        if step:
+            add_to_memory(q_text, step)
+            conversation_history.append({"question": q_text, "answer": step})
+            return JSONResponse({"answer": step, "history": conversation_history})
+        mr = solve_math_expression(q_text)
+        if mr:
+            add_to_memory(q_text, mr)
+            conversation_history.append({"question": q_text, "answer": mr})
+            return JSONResponse({"answer": mr, "history": conversation_history})
 
-        math_result = solve_math_expression(q_text)
-        if math_result:
-            add_to_memory(q_text, math_result)
-            conversation_history.append({"question": q_text, "answer": math_result})
-            return JSONResponse({"answer": math_result, "history": conversation_history})
-
-    # 2) Greetings / Farewell / Emotion
+    # 2) greeting / farewell / emotion
     if resp := check_greeting(q_text):
         return JSONResponse({"answer": resp, "history": conversation_history})
     if resp := check_farewell(q_text):
@@ -609,104 +428,71 @@ async def ask(query: Query):
     if resp := detect_emotion(q_text):
         return JSONResponse({"answer": resp, "history": conversation_history})
 
-    # 3) Identity / capabilities
+    # 3) identity / capabilities
     answer = None
-    lower_q = q_text.lower()
-    if any(phrase in lower_q for phrase in INTENT_MAP["self_identity"]):
+    lq = q_text.lower()
+    if any(phrase in lq for phrase in INTENT_MAP["self_identity"]):
         answer = "I'm Brightly — your friendly Modern Senior Secondary School assistant."
-    elif any(word in lower_q for word in ["provide", "offer", "help", "assist", "what can you"]):
-        answer = random.choice(
-            [
-                "I can help you with school details, fees, admissions, exams, and staff information.",
-                "I assist with queries about Modern Senior Secondary School — like fees, staff, or classes.",
-                "I provide details about school activities, admissions, and academic info.",
-                "I’m here to share school-related information and help you find what you need!",
-            ]
-        )
-
+    elif any(word in lq for word in ["provide", "offer", "help", "assist", "what can you"]):
+        answer = random.choice([
+            "I can help you with school details, fees, admissions, exams, and staff information.",
+            "I assist with queries about Modern Senior Secondary School — like fees, staff, or classes.",
+            "I provide details about school activities, admissions, and academic info.",
+            "I’m here to share school-related information and help you find what you need!"
+        ])
     if answer:
         add_to_memory(q_text, answer)
         conversation_history.append({"question": q_text, "answer": answer})
         return JSONResponse({"answer": answer, "history": conversation_history})
 
-    # 4) Main processing (split)
-    sub_qs = split_subquestions(q_text)
-
-    simple_math_questions = {
-        "quadratic equations": "A quadratic equation is of the form ax² + bx + c = 0. The solutions are x = [-b ± √(b² - 4ac)] / 2a.",
-    }
+    # 4) main retrieval + LLM
+    sub_qs = re.split(r"[?;]| and ", q_text)
+    sub_qs = [s.strip() for s in sub_qs if s.strip()]
 
     for sq in sub_qs:
-        answer = None
+        # build context from manual cache, vector stores, and session memory
+        context = ""
+        # manual cache
+        MANUAL_CACHE_FILE = "answer_cache.json"
+        if os.path.exists(MANUAL_CACHE_FILE):
+            try:
+                with open(MANUAL_CACHE_FILE, "r", encoding="utf-8") as f:
+                    manual_cache = json.load(f)
+                if sq in manual_cache:
+                    context += str(manual_cache[sq].get("answer", "")) + "\n"
+            except Exception as e:
+                log.warning("Manual cache load error: %s", e)
+        # vector stores
+        for name, retr in vector_stores.items():
+            try:
+                docs = safe_retrieve(retr, sq)
+                if docs:
+                    context += "\n".join(getattr(d, "page_content", str(d)) for d in docs) + "\n"
+            except Exception as e:
+                log.warning("Retriever error (%s): %s", name, e)
+        # session memory
+        conv_ctx = retrieve_relevant_memory(sq)
+        if conv_ctx:
+            context += "\n--- Previous conversation ---\n" + conv_ctx
+        if not context.strip():
+            context = "No data found."
 
-        for key, val in simple_math_questions.items():
-            if key in sq.lower():
-                answer = val
-                break
-
-        if not answer and math_regex.search(sq):
-            step_result = explain_math_step_by_step(sq)
-            answer = step_result or solve_math_expression(sq)
-
-        if not answer:
-            context = ""
-            # Manual cache (optional file)
-            MANUAL_CACHE_FILE = "answer_cache.json"
-            if os.path.exists(MANUAL_CACHE_FILE):
-                try:
-                    with open(MANUAL_CACHE_FILE, "r", encoding="utf-8") as f:
-                        manual_cache = json.load(f)
-                    if sq in manual_cache:
-                        context += str(manual_cache[sq].get("answer", "")) + "\n"
-                except Exception as e:
-                    log.warning(f"⚠️ Manual cache load error: {e}")
-
-            # Vector stores
-            for store_name, retriever in vector_stores.items():
-                try:
-                    results = safe_retrieve(retriever, sq)
-                    if results:
-                        context += "\n".join([doc.page_content for doc in results]) + "\n"
-                except Exception as e:
-                    log.warning(f"⚠️ Retriever '{store_name}' error: {e}")
-
-            # Conversation memory
-            conv_context = retrieve_relevant_memory(sq)
-            if conv_context:
-                context += "\n--- Previous conversation ---\n" + conv_context
-            if not context.strip():
-                context = "No data found."
-
-            prompt = f"""
-You are called and are Brightly — the official AI assistant of Modern Senior Secondary School, Chennai.
-You are also a helpful school AI tutor.
-Explain and solve problems in math, physics, and chemistry like an experienced teacher.
-When students ask a study question:
-- Give short, clear explanations with steps.
-- Use plain, teacher-style English.
-
-Knowledge Scope:
-- NCERT-based Physics, Chemistry, Maths (Classes 6–12)
-- General school information
-
-Tone:
-- Friendly, conversational, natural
-- Keep responses concise
-
-Rules:
-- Avoid politics; keep school-relevant
-- If asked who created you, answer: "I was created by the technical team at Modern Senior Secondary School to assist students and parents with school-related queries."
-
+        prompt = f"""
+You are Brightly — the official AI assistant for Modern Senior Secondary School, Chennai.
+Explain and solve problems succinctly. Use teacher-style English and short steps for math.
 Context:
 {context}
 Question: {sq}
 Answer:
 """
-            try:
-                answer = get_answer_llm().invoke(prompt).strip()
-            except Exception as e:
-                log.warning(f"⚠️ LLM error: {e}")
-                answer = "I’m having trouble accessing the data at the moment, please try again."
+        try:
+            llm = get_answer_llm()
+            if llm is None:
+                raise RuntimeError("LLM not configured")
+            answer = llm.invoke(prompt).strip()
+        except Exception as e:
+            log.warning("LLM error: %s", e)
+            answer = "I’m having trouble accessing the model or data; please try again later."
 
         add_to_memory(sq, answer)
         conversation_history.append({"question": sq, "answer": answer})
@@ -714,71 +500,65 @@ Answer:
 
     return JSONResponse({"answer": "\n".join(final_answers), "history": conversation_history})
 
-# ======================
-# Sessions (optional persistence)
-# ======================
+# ----------------------
+# Sessions persistence
+# ----------------------
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
-SESSION_FILE = None
+SESSION_FILE: Optional[str] = None
 
 def start_new_session():
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(SESSION_DIR, f"session_{timestamp}.json")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(SESSION_DIR, f"session_{ts}.json")
 
-def save_session_data(session_file):
+def save_session_data(session_file: str):
     try:
-        data_to_save = [{"question": q["question"], "answer": q["answer"]} for q in session_memory[-50:]]
+        data = [{"question": q["question"], "answer": q["answer"]} for q in session_memory[-50:]]
         with open(session_file, "w", encoding="utf-8") as f:
-            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        log.warning(f"⚠️ Failed to save session: {e}")
+        log.warning("Failed to save session: %s", e)
 
-def cleanup_old_sessions(max_files=10):
+def cleanup_old_sessions(max_files: int = 10):
     try:
-        files = sorted(
-            [os.path.join(SESSION_DIR, f) for f in os.listdir(SESSION_DIR) if f.endswith(".json")],
-            key=os.path.getmtime,
-        )
+        files = sorted([os.path.join(SESSION_DIR,f) for f in os.listdir(SESSION_DIR) if f.endswith(".json")], key=os.path.getmtime)
         for f in files[:-max_files]:
             try:
                 os.remove(f)
-                log.info(f"🗑️ Deleted old session: {f}")
+                log.info("Deleted old session: %s", f)
             except Exception:
                 pass
     except Exception as e:
-        log.warning(f"⚠️ Session cleanup error: {e}")
+        log.warning("Session cleanup error: %s", e)
 
-# ======================
-# Startup / Shutdown
-# ======================
+# ----------------------
+# Startup/shutdown
+# ----------------------
 @app.on_event("startup")
 def startup_event():
-    log.info("🚀 Server starting up...")
-    log.info(f"   Project = {GOOGLE_CLOUD_PROJECT}")
-    log.info(f"   Location = {GOOGLE_CLOUD_LOCATION}")
-    log.info(f"   Refresh vectors on startup = {REFRESH_VECTORS_ON_STARTUP}")
-    if netlify_origin:
-        log.info(f"   NETLIFY_ORIGIN = {netlify_origin}")
-    cleanup_old_sessions(max_files=10)
-
+    log.info("Server starting up. Project=%s, Location=%s", PROJECT_ID, LOCATION)
+    cleanup_old_sessions()
     if REFRESH_VECTORS_ON_STARTUP:
         refresh_vector_stores()
         load_ncert_vectors()
-        log.info("✅ Vector stores + NCERT data loaded.")
+        log.info("Vector stores loaded: %s", list(vector_stores.keys()))
     else:
-        log.info("⏭️ Skipping vector refresh/load on startup.")
+        log.info("Skipping vector refresh on startup.")
 
 @app.on_event("shutdown")
 def shutdown_event():
-    log.info("🚪 Server shutting down...")
+    log.info("Server shutting down.")
     global SESSION_FILE
     if SESSION_FILE is None:
         SESSION_FILE = start_new_session()
     save_session_data(SESSION_FILE)
-    cleanup_old_sessions(max_files=10)
-    log.info(f"💾 Session data saved to {SESSION_FILE}")
+    cleanup_old_sessions()
+    log.info("Session data saved to %s", SESSION_FILE)
 
-# Local dev entrypoint (Cloud Run uses your Docker CMD)
+# ----------------------
+# Local dev entrypoint
+# ----------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")), reload=False)
+    port = int(os.getenv("PORT", "8080"))
+    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False)
