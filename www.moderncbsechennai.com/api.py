@@ -1,64 +1,249 @@
 # api.py
 import os
 import json
+import math
+import re
+import random
 import logging
-import glob
+import hashlib
 from datetime import datetime
-from typing import List, Dict, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 # OpenAI client
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
-# LangChain/FAISS pieces
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.docstore.document import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+# Attempt to import your vector loader; fallback to None
+try:
+    from vector import load_vector_store
+except Exception as e:
+    load_vector_store = None
+    # We will log after logger is initialized
 
-import numpy as np
-
-# -----------------------
-# Basic configuration
-# -----------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-logging.basicConfig(level=LOG_LEVEL)
+# ======================
+# Logging / Debug
+# ======================
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 log = logging.getLogger("msss")
 
+# ----------------------
+# Defaults for your deployment (can be overridden by env)
+# ----------------------
+DEFAULT_PROJECT = "modernschoolnanganallurChatbot"
+DEFAULT_LOCATION = "asia-south1"
+
+def env(name: str, default: str | None = None) -> str | None:
+    return os.getenv(name, default)
+
+GOOGLE_CLOUD_PROJECT = env("GOOGLE_CLOUD_PROJECT", DEFAULT_PROJECT)
+GOOGLE_CLOUD_LOCATION = env("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
+REFRESH_VECTORS_ON_STARTUP = env("REFRESH_VECTORS_ON_STARTUP", "true").lower() == "true"
+
+# ======================
+# OpenAI client setup
+# ======================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise EnvironmentError("OPENAI_API_KEY must be set in environment")
+if OpenAI is None:
+    log.error("OpenAI python package not available. Install `openai`.")
+    _openai_client = None
+else:
+    try:
+        # new OpenAI client usage
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        _openai_client = None
+        log.error(f"Failed to initialize OpenAI client: {e}")
 
-# Chat model choice (gpt-4o-mini by default)
-OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-# Embedding model for router & vector store
-OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+# ======================
+# Embedding & LLM wrappers (replace Vertex)
+# ======================
+class OpenAIEmbedder:
+    def __init__(self, client: "OpenAI", model: str = "text-embedding-3-small", dim: int = 512):
+        self.client = client
+        self.model = model
+        self.dim = dim
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
-SESSION_DIR = os.getenv("SESSION_DIR", "sessions")
-os.makedirs(SESSION_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)  # ensure data dir exists
+    def embed_query(self, text: str):
+        if not text:
+            return [0.0] * self.dim
+        if self.client is None:
+            # fallback deterministic hashing to vector
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = []
+            prev = h
+            while len(vec) < self.dim:
+                prev = hashlib.sha256(prev).digest()
+                vec.extend([b / 255.0 for b in prev])
+            return vec[:self.dim]
+        try:
+            # call OpenAI embeddings API
+            res = self.client.embeddings.create(model=self.model, input=text)
+            emb = res.data[0].embedding
+            return emb
+        except Exception as e:
+            log.warning(f"Embedding call failed: {e}; using fallback embedder.")
+            h = hashlib.sha256(text.encode("utf-8")).digest()
+            vec = []
+            prev = h
+            while len(vec) < self.dim:
+                prev = hashlib.sha256(prev).digest()
+                vec.extend([b / 255.0 for b in prev])
+            return vec[:self.dim]
 
-# Safety: limit retriever results and session length
-MAX_FILES_TO_ROUTE = int(os.getenv("MAX_FILES_TO_ROUTE", "3"))
-MAX_SNIPPETS = int(os.getenv("MAX_SNIPPETS", "8"))
-MAX_SESSION_ENTRIES = int(os.getenv("MAX_SESSION_ENTRIES", "200"))
+class OpenAIChatLLM:
+    def __init__(self, client: "OpenAI", model: str = "gpt-4o-mini", system_prompt: str | None = None):
+        self.client = client
+        self.model = model
+        self.system_prompt = system_prompt or (
+            "You are Brightly, the official AI assistant of Modern Senior Secondary School, Chennai. "
+            "Answer in a concise, helpful, teacher-style manner."
+        )
 
-# -----------------------
-# Clients / models
-# -----------------------
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-embeddings_model = OpenAIEmbeddings(model=OPENAI_EMBEDDING_MODEL)
+    def invoke(self, prompt: str, temperature: float = 0.2, max_tokens: int = 1024):
+        if self.client is None:
+            raise RuntimeError("OpenAI client not initialized")
+        try:
+            # Use the Chat Completions API via client.chat.completions.create
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            # New client returns choices with message content
+            content = ""
+            if resp and getattr(resp, "choices", None):
+                # handle different shapes robustly
+                choice = resp.choices[0]
+                # some clients provide message or delta
+                message = getattr(choice, "message", None)
+                if message and getattr(message, "content", None):
+                    content = message.content
+                else:
+                    # fallback to text or output_text
+                    content = getattr(choice, "text", "") or getattr(resp, "output_text", "") or ""
+            return content.strip()
+        except Exception as e:
+            raise
 
-# -----------------------
-# FastAPI app
-# -----------------------
-app = FastAPI(title="Modern School Chatbot", version="1.0")
+# Emotion detection uses same chat model but short prompt
+class OpenAIEmotionLLM:
+    def __init__(self, client: "OpenAI", model: str = "gpt-4o-mini"):
+        self.client = client
+        self.model = model
 
-# Static mounts used by your frontend index.html
+    def invoke(self, prompt: str):
+        if self.client is None:
+            raise RuntimeError("OpenAI client not initialized")
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=32,
+            )
+            content = ""
+            if resp and getattr(resp, "choices", None):
+                choice = resp.choices[0]
+                message = getattr(choice, "message", None)
+                if message and getattr(message, "content", None):
+                    content = message.content
+                else:
+                    content = getattr(choice, "text", "") or getattr(resp, "output_text", "") or ""
+            return content.strip()
+        except Exception as e:
+            raise
+
+# Lazy constructors for embedding and llms
+_embedding_model = None
+_answer_llm = None
+_emotion_llm = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = OpenAIEmbedder(client=_openai_client, model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"), dim=512)
+    return _embedding_model
+
+def get_answer_llm():
+    global _answer_llm
+    if _answer_llm is None:
+        _answer_llm = OpenAIChatLLM(client=_openai_client, model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
+    return _answer_llm
+
+def get_emotion_llm():
+    global _emotion_llm
+    if _emotion_llm is None:
+        _emotion_llm = OpenAIEmotionLLM(client=_openai_client, model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
+    return _emotion_llm
+
+# ----------------------
+# Globals / state
+# ----------------------
+conversation_history = []
+session_memory = []
+vector_stores = {}
+
+os.makedirs("vectorstore", exist_ok=True)
+os.makedirs("sessions", exist_ok=True)
+for _d in ("img", "css", "dist"):
+    os.makedirs(_d, exist_ok=True)
+
+# ======================
+# FastAPI app + CORS
+# ======================
+app = FastAPI(title="MSSS Backend", version="1.0.0")
+
+# ----------------------
+# CORS setup (Netlify + Local)
+# ----------------------
+netlify_origin = os.getenv("NETLIFY_ORIGIN", "https://modernschoolnanganallur.netlify.app").rstrip("/")
+extra_origins = [
+    o.strip().rstrip("/")
+    for o in os.getenv("EXTRA_CORS_ORIGINS", "").split(",")
+    if o.strip()
+]
+allow_localhost = os.getenv("ALLOW_LOCALHOST", "true").lower() == "true"
+local_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+] if allow_localhost else []
+
+allowed_origins = [o for o in [netlify_origin] if o] + extra_origins + local_origins
+if not allowed_origins:
+    # Fallback, but prefer explicit allowlist
+    allowed_origins = ["*"]
+
+log.info(f"🔐 CORS allow_origins = {allowed_origins}")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
+# ----------------------
+# Static mounts
+# ----------------------
 if os.path.isdir("img"):
     app.mount("/img", StaticFiles(directory="img"), name="img")
 if os.path.isdir("css"):
@@ -66,337 +251,534 @@ if os.path.isdir("css"):
 if os.path.isdir("dist"):
     app.mount("/dist", StaticFiles(directory="dist"), name="dist")
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if DEBUG:
+        log.debug(f"➡️  {request.method} {request.url.path}")
+    response = await call_next(request)
+    if DEBUG:
+        log.debug(f"⬅️  {request.method} {request.url.path} -> {response.status_code}")
+    return response
+
 @app.get("/")
-def serve_index():
+def index():
     if os.path.exists("index.html"):
         return FileResponse("index.html")
-    return JSONResponse({"status": "ok", "message": "Modern School Chatbot API running"})
-
-# CORS is expected to be handled by Cloud Run / frontend. If you need middleware,
-# you can add CORSMiddleware externally in deployment or uncomment below.
-# from fastapi.middleware.cors import CORSMiddleware
-# app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-# -----------------------
-# Dataset descriptions for router (meta-index)
-# Keep this aligned with files in /data
-# -----------------------
-FILE_DESCRIPTIONS = {
-    "about_school.txt": "general info, history, mission, and overview of Modern Senior Secondary School",
-    "address.txt": "address, contact details, phone numbers and location of the school",
-    "admission.txt": "admission procedures, eligibility, application process and dates",
-    "staff.txt": "principal, vice-principal, headmistress, teachers and staff contact roles",
-    "fees.txt": "fee structure, term fees, annual charges and payment instructions",
-    "holidays.txt": "list of holidays and vacation schedules",
-    "curriculum.txt": "subjects offered and high-level curriculum details",
-    "extra_curricular.txt": "clubs, sports, arts and extracurricular activities",
-    "infrastructure.txt": "labs, library, auditorium, playground and facilities",
-    "competition_awards.txt": "awards and competition achievements",
-    "ncert_math.txt": "NCERT math topics and formulas for school curriculum",
-    "ncert_physics.txt": "NCERT physics formulas and concepts for school",
-    "ncert_chemistry.txt": "NCERT chemistry topics and essential definitions",
-    "social_studies.txt": "history, geography and civics overview",
-    "school_toppers.txt": "records of high performing students and toppers",
-    "student.txt": "student-related information and activities",
-    "common_queries.txt": "commonly asked questions: timings, uniform, meetings, transports"
-}
-
-# If you have additional data files in data/ that are not listed, router will still use them by filename fallback.
-
-# -----------------------
-# Caches and router state
-# -----------------------
-# VECTOR_CACHE maps absolute file path -> LangChain retriever
-VECTOR_CACHE: Dict[str, any] = {}
-
-# Router descriptor embeddings: numpy matrix shape (n_files, dim)
-ROUTER_EMBS: Optional[np.ndarray] = None
-ROUTER_ORDER: List[str] = []  # list of filenames in same order as ROUTER_EMBS rows
-
-# -----------------------
-# Helper utilities
-# -----------------------
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-def split_text_to_documents(text: str) -> List[Document]:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150, separators=["\n\n", "\n", " "])
-    chunks = splitter.split_text(text)
-    return [Document(page_content=c) for c in chunks]
-
-def l2_normalize_rows(arr: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    return arr / norms
-
-# -----------------------
-# Build router embeddings from FILE_DESCRIPTIONS and data directory
-# -----------------------
-def build_router_index() -> None:
-    global ROUTER_EMBS, ROUTER_ORDER
-    # Use filenames present in data directory and FILE_DESCRIPTIONS keys
-    files_in_data = sorted([os.path.basename(p) for p in glob.glob(os.path.join(DATA_DIR, "*.txt"))])
-    # prefer files_in_data ordering, but include any known descriptions
-    ordered = []
-    for name in files_in_data:
-        ordered.append(name)
-    # ensure any described files present in ordered
-    for fname in FILE_DESCRIPTIONS.keys():
-        if fname not in ordered:
-            # if file missing but described, still include description row (use fname)
-            ordered.append(fname)
-    ROUTER_ORDER = ordered
-    descriptions = []
-    for fname in ROUTER_ORDER:
-        desc = FILE_DESCRIPTIONS.get(fname)
-        if not desc:
-            # fallback: use first 200 chars of file if exists, else file name
-            p = os.path.join(DATA_DIR, fname)
-            if os.path.exists(p):
-                try:
-                    text = read_text_file(p)
-                    desc = (text[:200] + "...") if len(text) > 200 else text
-                except Exception:
-                    desc = fname
-            else:
-                desc = fname
-        descriptions.append(desc)
-    # embed all descriptions
-    emb_list = []
-    for d in descriptions:
-        try:
-            emb = embeddings_model.embed_query(d)
-        except Exception as e:
-            log.warning("Router embedding failed for description: %s", e)
-            emb = [0.0] * 1536
-        emb_list.append(emb)
-    ROUTER_EMBS = l2_normalize_rows(np.array(emb_list, dtype=float))
-    log.info("Router index built with %d entries", len(ROUTER_ORDER))
-
-# run router build at import
-try:
-    build_router_index()
-except Exception as e:
-    log.warning("Failed to build router index at startup: %s", e)
-    ROUTER_EMBS = None
-    ROUTER_ORDER = []
-
-# -----------------------
-# Load/create FAISS retriever per file (cached)
-# -----------------------
-def load_vector_retriever_for_file(filename: str):
-    path = os.path.join(DATA_DIR, filename)
-    abs_path = os.path.abspath(path)
-    if abs_path in VECTOR_CACHE:
-        return VECTOR_CACHE[abs_path]
-    if not os.path.exists(abs_path):
-        log.warning("Data file missing for vector retrieval: %s", abs_path)
-        return None
-    try:
-        text = read_text_file(abs_path)
-        docs = split_text_to_documents(text)
-        vs = FAISS.from_documents(docs, embeddings_model)
-        retriever = vs.as_retriever(search_kwargs={"k": 4})
-        VECTOR_CACHE[abs_path] = retriever
-        log.info("Built FAISS retriever for %s (%d chunks)", filename, len(docs))
-        return retriever
-    except Exception as e:
-        log.warning("Failed to build FAISS retriever for %s: %s", filename, e)
-        return None
-
-# -----------------------
-# Semantic routing + keyword fallback
-# -----------------------
-# Small keyword map for common fast matches
-KEYWORD_MAP = {
-    "fee": "fees.txt", "fees": "fees.txt", "tuition": "fees.txt",
-    "principal": "staff.txt", "teacher": "staff.txt", "staff": "staff.txt",
-    "address": "address.txt", "where": "address.txt",
-    "admission": "admission.txt", "apply": "admission.txt",
-    "holiday": "holidays.txt", "vacation": "holidays.txt", "holidays": "holidays.txt",
-    "infrastructure": "infrastructure.txt", "facility": "infrastructure.txt",
-    "toppers": "school_toppers.txt", "topper": "school_toppers.txt",
-    "math": "ncert_math.txt", "physics": "ncert_physics.txt", "chemistry": "ncert_chemistry.txt",
-    "curriculum": "curriculum.txt", "activity": "extra_curricular.txt", "club": "extra_curricular.txt",
-    "faq": "common_queries.txt", "common": "common_queries.txt",
-}
-
-def route_files_for_query(query: str, max_files: int = MAX_FILES_TO_ROUTE) -> List[str]:
-    ql = query.lower()
-    matched = []
-    # keyword quick matches
-    for kw, fname in KEYWORD_MAP.items():
-        if kw in ql and fname not in matched:
-            matched.append(fname)
-            if len(matched) >= max_files:
-                break
-    # semantic routing for additional files if needed
-    if len(matched) < max_files and ROUTER_EMBS is not None and len(ROUTER_ORDER) > 0:
-        try:
-            q_emb = embeddings_model.embed_query(query)
-            q_vec = np.array(q_emb, dtype=float)
-            if np.linalg.norm(q_vec) == 0:
-                q_vec = q_vec + 1e-10
-            q_vec = q_vec / (np.linalg.norm(q_vec) or 1.0)
-            sims = ROUTER_EMBS @ q_vec
-            top_idx = list(np.argsort(-sims)[:max_files])
-            for i in top_idx:
-                fname = ROUTER_ORDER[i]
-                if fname not in matched:
-                    matched.append(fname)
-                if len(matched) >= max_files:
-                    break
-        except Exception as e:
-            log.warning("Semantic routing error: %s", e)
-    # final fallback: use files actually present in /data
-    present_files = [os.path.basename(p) for p in glob.glob(os.path.join(DATA_DIR, "*.txt"))]
-    final = [f for f in matched if f in present_files]
-    if not final:
-        # if none matched, choose top present files from router order
-        for fname in ROUTER_ORDER:
-            if fname in present_files:
-                final.append(fname)
-            if len(final) >= max_files:
-                break
-    return final[:max_files]
-
-# -----------------------
-# Session management (per-user JSON files)
-# -----------------------
-def session_filename_for_user(user_id: str) -> str:
-    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (user_id or "default_user"))
-    return os.path.join(SESSION_DIR, f"{safe}.json")
-
-def load_session_history(user_id: str) -> List[Dict]:
-    path = session_filename_for_user(user_id)
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def save_session_history(user_id: str, history: List[Dict]) -> None:
-    path = session_filename_for_user(user_id)
-    try:
-        # keep only the most recent MAX_SESSION_ENTRIES for disk
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(history[-MAX_SESSION_ENTRIES:], f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.warning("Failed to save session for %s: %s", user_id, e)
-
-# -----------------------
-# Formatting helper
-# -----------------------
-def clean_answer_spacing(text: str) -> str:
-    if not text:
-        return ""
-    # split on double newlines and single line breaks, keep paragraphs
-    lines = [ln.strip() for ln in text.splitlines()]
-    paras = []
-    cur = []
-    for ln in lines:
-        if ln == "":
-            if cur:
-                paras.append(" ".join(cur).strip())
-                cur = []
-        else:
-            cur.append(ln)
-    if cur:
-        paras.append(" ".join(cur).strip())
-    # ensure blank line between paragraphs
-    return "\n\n".join(p for p in paras if p)
-
-# -----------------------
-# Core retrieval + generation
-# -----------------------
-def get_answer_for_query(query: str, user_id: str) -> Dict:
-    # 1) choose relevant files
-    chosen_files = route_files_for_query(query, max_files=MAX_FILES_TO_ROUTE)
-    context_snippets = []
-    # 2) fetch relevant docs from each chosen file
-    for fname in chosen_files:
-        retriever = load_vector_retriever_for_file(fname)
-        if not retriever:
-            continue
-        try:
-            docs = retriever.get_relevant_documents(query)
-            for d in docs:
-                snippet = d.page_content.strip()
-                if snippet:
-                    header = f"--- source: {fname} ---"
-                    context_snippets.append(f"{header}\n{snippet}")
-        except Exception as e:
-            log.warning("Error retrieving documents from %s: %s", fname, e)
-    context_text = "\n\n".join(context_snippets[:MAX_SNIPPETS]) if context_snippets else ""
-
-    # 3) construct prompt with instructions
-    system_instructions = (
-        "You are Brightly, the official assistant for Modern Senior Secondary School, Chennai. "
-        "Use the context provided to answer accurately. "
-        "If the answer is not found in context, say you don't have that information and suggest where to check. "
-        "Be concise. Use blank lines between paragraphs. Avoid opinionated content."
-    )
-    user_prompt = f"Context:\n{context_text}\n\nQuestion: {query}\n\nAnswer:"
-
-    # 4) call OpenAI chat
-    try:
-        response = openai_client.chat.completions.create(
-            model=OPENAI_CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system_instructions},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-            max_tokens=800,
-        )
-        # extract message text robustly
-        raw = ""
-        try:
-            raw = response.choices[0].message.content
-        except Exception:
-            try:
-                raw = response.choices[0].text
-            except Exception:
-                raw = ""
-        answer = clean_answer_spacing(raw or "").strip()
-    except Exception as e:
-        log.warning("OpenAI generation error: %s", e)
-        answer = "I am having trouble accessing the model right now. Please try again later."
-
-    # 5) update user session history
-    history = load_session_history(user_id)
-    entry = {"question": query, "answer": answer, "sources": chosen_files, "ts": datetime.utcnow().isoformat()}
-    history.append(entry)
-    save_session_history(user_id, history)
-
-    return {"answer": answer, "history": history, "sources": chosen_files}
-
-# -----------------------
-# Endpoints
-# -----------------------
-@app.post("/chat")
-async def chat_endpoint(req: Request):
-    try:
-        payload = await req.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON payload"}, status_code=400)
-    question = (payload.get("question") or payload.get("message") or "").strip()
-    user_id = payload.get("user_id", "default_user")
-    if not question:
-        return JSONResponse({"error": "empty question"}, status_code=400)
-    result = get_answer_for_query(question, user_id)
-    return JSONResponse(result)
+    return JSONResponse({
+        "message": "Modern Senior Secondary School — API online",
+        "project": GOOGLE_CLOUD_PROJECT,
+        "location": GOOGLE_CLOUD_LOCATION,
+        "vectors_refreshed_on_startup": REFRESH_VECTORS_ON_STARTUP
+    })
 
 @app.get("/health")
+@app.get("/_/health")
 def health():
-    return JSONResponse({"status": "ok", "service": "Modern School Chatbot"})
+    return {"status": "ok"}
 
-# -----------------------
-# Local run
-# -----------------------
+@app.get("/llm/health")
+def llm_health():
+    try:
+        txt = get_answer_llm().invoke("Say: Ok!").strip()
+        return {"ok": bool(txt), "model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"), "text": txt or "(empty)"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+@app.post("/chat")
+async def chat(payload: dict):
+    msg = payload.get("message", "")
+    return {"reply": f"Echo: {msg}"}
+
+# ======================
+# Math utilities
+# ======================
+def solve_math_expression(expr: str):
+    """
+    Degree-based trig; simple equation solving with SymPy; safe eval sandbox.
+    """
+    try:
+        import sympy as sp
+
+        expr = (
+            expr.lower()
+            .replace("^", "**")
+            .replace("×", "*")
+            .replace("÷", "/")
+            .strip()
+        )
+
+        x, y, z = sp.symbols("x y z")
+        allowed = {
+            "sin": lambda deg: math.sin(math.radians(float(deg))),
+            "cos": lambda deg: math.cos(math.radians(float(deg))),
+            "tan": lambda deg: math.tan(math.radians(float(deg))),
+            "asin": lambda val: math.degrees(math.asin(float(val))),
+            "acos": lambda val: math.degrees(math.acos(float(val))),
+            "atan": lambda val: math.degrees(math.atan(float(val))),
+            "sqrt": math.sqrt,
+            "log": math.log10,
+            "ln": math.log,
+            "pi": math.pi,
+            "e": math.e,
+            "pow": pow,
+        }
+
+        if "=" in expr:
+            lhs, rhs = expr.split("=")
+            solution = sp.solve(sp.sympify(lhs) - sp.sympify(rhs), x)
+            if not solution:
+                return "No real solution found."
+            if len(solution) == 1:
+                return f"The value of x is {solution[0]}."
+            return f"Possible values of x are: {', '.join(map(str, solution))}."
+
+        try:
+            simplified = sp.simplify(expr)
+            if str(simplified) != expr:
+                expr = str(simplified)
+        except Exception:
+            pass
+
+        result = eval(expr, {"__builtins__": None}, allowed)  # guarded
+        if isinstance(result, float):
+            result = round(result, 6)
+        return f"The result is {result}"
+
+    except Exception as e:
+        log.warning(f"⚠️ Math solver error: {e}")
+        return None
+
+
+def explain_math_step_by_step(expr: str):
+    import sympy as sp
+    x, y, z = sp.symbols("x y z")
+    try:
+        expr = expr.lower().replace("^", "**").replace("×", "*")
+        if ("differentiate" in expr) or ("derivative" in expr) or ("find dy/dx" in expr):
+            target = expr.split("of")[-1].strip()
+            func = sp.sympify(target)
+            result = sp.diff(func, x)
+            return f"The derivative of {func} with respect to x is: {result}"
+        elif ("integrate" in expr) or ("integration" in expr):
+            target = expr.split("of")[-1].strip()
+            func = sp.sympify(target)
+            result = sp.integrate(func, x)
+            return f"The integral of {func} with respect to x is: {result} + C"
+        elif "=" in expr:
+            lhs, rhs = expr.split("=")
+            solution = sp.solve(sp.sympify(lhs) - sp.sympify(rhs), x)
+            steps = [
+                f"Step 1️⃣: Start with {lhs} = {rhs}",
+                f"Step 2️⃣: Move all terms to one side: ({lhs}) - ({rhs}) = 0",
+                f"Step 3️⃣: Simplify and solve for x",
+                f"✅ Solution: x = {solution}",
+            ]
+            return "\n".join(steps)
+        else:
+            simplified = sp.simplify(expr)
+            return f"Simplified form: {simplified}"
+    except Exception:
+        return None
+
+# ======================
+# Memory helpers
+# ======================
+def add_to_memory(question: str, answer: str):
+    try:
+        embed = get_embedding_model().embed_query(question)
+    except Exception as e:
+        log.warning(f"⚠️ Embedding error: {e}")
+        embed = None
+    session_memory.append({"question": question, "answer": answer, "embedding": embed})
+
+def retrieve_relevant_memory(question: str, top_n=5):
+    try:
+        query_embed = get_embedding_model().embed_query(question)
+    except Exception as e:
+        log.warning(f"⚠️ Embedding error: {e}")
+        return ""
+
+    if not session_memory:
+        return ""
+
+    def cosine_similarity(a, b):
+        if a is None or b is None:
+            return 0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(y * y for y in b) ** 0.5
+        if norm_a == 0 or norm_b == 0:
+            return 0
+        return dot / (norm_a * norm_b)
+
+    scored = []
+    for entry in session_memory:
+        score = cosine_similarity(query_embed, entry["embedding"])
+        scored.append((score, entry))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
+    top_entries = [f"Q: {e['question']}\nA: {e['answer']}" for _, e in scored[:top_n]]
+    return "\n".join(top_entries)
+
+# ======================
+# Greetings / Farewells / Emotion
+# ======================
+GREETINGS = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"]
+FAREWELLS = ["bye", "goodbye", "see you", "farewell"]
+
+def check_greeting(q: str):
+    q = q.lower()
+    if any(g in q for g in GREETINGS):
+        return ("Welcome to Modern Senior Secondary School! I'm Brightly, your assistant. "
+                "How can I help you today?")
+    return None
+
+def check_farewell(q: str):
+    q = q.lower()
+    if any(f in q for f in FAREWELLS):
+        return "Goodbye! Have a great day 🌟 Come back soon!"
+    return None
+
+def detect_emotion(user_input: str):
+    factual_keywords = [
+        "what","where","when","how","who","which","fee","fees","address","location",
+        "principal","teacher","school","exam","contact","number","subject","student",
+        "class","admission",
+    ]
+    if any(re.search(rf"\b{kw}\b", user_input.lower()) for kw in factual_keywords):
+        return None
+    if any(emoji in user_input for emoji in ["💡", "😊", "😄", "🎉", "🥳"]):
+        return None
+    prompt = f"""
+Detect if this message is Positive (appreciation/humor) or Negative (complaint/anger).
+Return only: Positive / Negative / Neutral
+Message: {user_input}
+"""
+    try:
+        resp = get_emotion_llm().invoke(prompt).strip().capitalize()
+        if resp == "Positive":
+            responses = [
+                "That's really kind of you, thank you 😊",
+                "Glad to hear that! You're awesome!",
+                "That made my day 😄",
+                "You're too sweet — thanks a lot!",
+                "Aww, I appreciate that 💫",
+            ]
+            return random.choice(responses)
+        elif resp == "Negative":
+            return "I'm sorry if something felt off. Let’s fix it together."
+    except Exception as e:
+        log.warning(f"⚠️ Emotion detection error: {e}")
+    return None
+
+# ======================
+# Intent & Vector Stores
+# ======================
+INTENT_MAP = {
+    "fees": ["fee", "fees", "structure", "tuition"],
+    "staff": ["principal", "teacher", "staff"],
+    "address": ["address", "location", "contact"],
+    "self_identity": ["who are you", "your name", "what are you", "who created you"],
+}
+
+def refresh_vector_stores():
+    """Build retrievers from all .txt files in ./data (if present)."""
+    global vector_stores
+    vector_stores = {}
+    if load_vector_store is None:
+        log.info("ℹ️ load_vector_store unavailable; skipping vector build.")
+        return
+    if not os.path.isdir("data"):
+        log.info("ℹ️ No data directory found; skipping vector build.")
+        return
+    current_files = {
+        os.path.splitext(f)[0]: os.path.join("data", f)
+        for f in os.listdir("data")
+        if f.endswith(".txt")
+    }
+    for name, file in current_files.items():
+        try:
+            retriever = load_vector_store(file)
+            if retriever:
+                vector_stores[name] = retriever
+        except Exception as e:
+            log.warning(f"⚠️ Failed to build retriever for '{file}': {e}")
+    log.info(f"✅ Vector stores loaded: {list(vector_stores.keys())}")
+
+# ======================
+# Misc helpers
+# ======================
+def split_subquestions(q: str):
+    if not any(sep in q.lower() for sep in [" and ", ";", "?"]):
+        return [q.strip()]
+    return [s.strip() for s in re.split(r"[?;]| and ", q) if s.strip()]
+
+CLASS_MAP = {
+    "lkg": "LKG", "ukg": "UKG", "1st": "I", "first": "I", "i": "I",
+    "2nd": "II", "second": "II", "3rd": "III", "third": "III",
+    "4th": "IV", "5th": "V", "6th": "VI", "7th": "VII", "8th": "VIII",
+    "9th": "IX", "10th": "X", "tenth": "X",
+    "11th cs": "XI-CS", "11th bio": "XI-BIO", "11th comm": "XI-COMM",
+    "12th cs": "XII-CS", "12th bio": "XII-BIO", "12th comm": "XII-COMM",
+}
+
+def safe_retrieve(retriever, query):
+    if hasattr(retriever, "get_relevant_documents"):
+        return retriever.get_relevant_documents(query)
+    return retriever._get_relevant_documents(query, run_manager=None)
+
+# ======================
+# NCERT optional datasets (if present)
+# ======================
+NCERT_DATASETS = {
+    "ncert_maths": "data/ncert_maths.txt",
+    "ncert_physics": "data/ncert_physics.txt",
+    "ncert_chemistry": "data/ncert_chemistry.txt",
+}
+
+def load_ncert_vectors():
+    if load_vector_store is None:
+        log.info("ℹ️ load_vector_store unavailable; skipping NCERT.")
+        return
+    loaded = []
+    for name, path in NCERT_DATASETS.items():
+        if os.path.exists(path):
+            try:
+                retriever = load_vector_store(path)
+                if retriever:
+                    vector_stores[name] = retriever
+                    loaded.append(name)
+            except Exception as e:
+                log.warning(f"⚠️ Failed to load NCERT '{name}': {e}")
+    log.info(f"📘 NCERT datasets loaded: {loaded}")
+
+# ======================
+# Schemas
+# ======================
+class Query(BaseModel):
+    question: str
+
+# ======================
+# Admin
+# ======================
+@app.post("/admin/refresh")
+def admin_refresh():
+    try:
+        refresh_vector_stores()
+        load_ncert_vectors()
+        return {
+            "ok": True,
+            "message": "Vectors refreshed",
+            "stores": list(vector_stores.keys()),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+# ======================
+# Ask endpoint
+# ======================
+
+@app.post("/ask")
+async def ask(query: Query):
+    q_text = query.question.strip()
+    final_answers = []
+
+    math_regex = re.compile(
+        r"d/dx|dx|differentiate|derive|integrate|roots|equation|simplify|sin|cos|tan|log|sqrt|=|[\d+\-*/^()]"
+    )
+
+    # 1) Math / Science direct
+    if math_regex.search(q_text):
+        step_result = explain_math_step_by_step(q_text)
+        if step_result:
+            add_to_memory(q_text, step_result)
+            conversation_history.append({"question": q_text, "answer": step_result})
+            return JSONResponse({"answer": step_result, "history": conversation_history})
+
+        math_result = solve_math_expression(q_text)
+        if math_result:
+            add_to_memory(q_text, math_result)
+            conversation_history.append({"question": q_text, "answer": math_result})
+            return JSONResponse({"answer": math_result, "history": conversation_history})
+
+    # 2) Greetings / Farewell / Emotion
+    if resp := check_greeting(q_text):
+        return JSONResponse({"answer": resp, "history": conversation_history})
+    if resp := check_farewell(q_text):
+        return JSONResponse({"answer": resp, "history": conversation_history})
+    if resp := detect_emotion(q_text):
+        return JSONResponse({"answer": resp, "history": conversation_history})
+
+    # 3) Identity / capabilities
+    answer = None
+    lower_q = q_text.lower()
+    if any(phrase in lower_q for phrase in INTENT_MAP["self_identity"]):
+        answer = "I'm Brightly — your friendly Modern Senior Secondary School assistant."
+    elif any(word in lower_q for word in ["provide", "offer", "help", "assist", "what can you"]):
+        answer = random.choice(
+            [
+                "I can help you with school details, fees, admissions, exams, and staff information.",
+                "I assist with queries about Modern Senior Secondary School — like fees, staff, or classes.",
+                "I provide details about school activities, admissions, and academic info.",
+                "I’m here to share school-related information and help you find what you need!",
+            ]
+        )
+
+    if answer:
+        add_to_memory(q_text, answer)
+        conversation_history.append({"question": q_text, "answer": answer})
+        return JSONResponse({"answer": answer, "history": conversation_history})
+
+    # 4) Main processing (split)
+    sub_qs = split_subquestions(q_text)
+
+    simple_math_questions = {
+        "quadratic equations": "A quadratic equation is of the form ax² + bx + c = 0. The solutions are x = [-b ± √(b² - 4ac)] / 2a.",
+    }
+
+    for sq in sub_qs:
+        answer = None
+
+        for key, val in simple_math_questions.items():
+            if key in sq.lower():
+                answer = val
+                break
+
+        if not answer and math_regex.search(sq):
+            step_result = explain_math_step_by_step(sq)
+            answer = step_result or solve_math_expression(sq)
+
+        if not answer:
+            context = ""
+            # Manual cache (optional file)
+            MANUAL_CACHE_FILE = "answer_cache.json"
+            if os.path.exists(MANUAL_CACHE_FILE):
+                try:
+                    with open(MANUAL_CACHE_FILE, "r", encoding="utf-8") as f:
+                        manual_cache = json.load(f)
+                    if sq in manual_cache:
+                        context += str(manual_cache[sq].get("answer", "")) + "\n"
+                except Exception as e:
+                    log.warning(f"⚠️ Manual cache load error: {e}")
+
+            # Vector stores
+            for store_name, retriever in vector_stores.items():
+                try:
+                    results = safe_retrieve(retriever, sq)
+                    if results:
+                        context += "\n".join([doc.page_content for doc in results]) + "\n"
+                except Exception as e:
+                    log.warning(f"⚠️ Retriever '{store_name}' error: {e}")
+
+            # Conversation memory
+            conv_context = retrieve_relevant_memory(sq)
+            if conv_context:
+                context += "\n--- Previous conversation ---\n" + conv_context
+            if not context.strip():
+                context = "No data found."
+
+            prompt = f"""
+You are called and are Brightly — the official AI assistant of Modern Senior Secondary School, Chennai.
+You are also a helpful school AI tutor.
+Explain and solve problems in math, physics, and chemistry like an experienced teacher.
+When students ask a study question:
+- Give short, clear explanations with steps.
+- Use plain, teacher-style English.
+
+Knowledge Scope:
+- NCERT-based Physics, Chemistry, Maths (Classes 6–12)
+- General school information
+
+Tone:
+- Friendly, conversational, natural
+- Keep responses concise
+
+Rules:
+- Avoid politics; keep school-relevant
+- If asked who created you, answer: "I was created by the technical team at Modern Senior Secondary School to assist students and parents with school-related queries."
+
+Context:
+{context}
+Question: {sq}
+Answer:
+"""
+            try:
+                answer = get_answer_llm().invoke(prompt).strip()
+            except Exception as e:
+                log.warning(f"⚠️ LLM error: {e}")
+                answer = "I’m having trouble accessing the data at the moment, please try again."
+
+        add_to_memory(sq, answer)
+        conversation_history.append({"question": sq, "answer": answer})
+        final_answers.append(answer)
+
+    return JSONResponse({"answer": "\n".join(final_answers), "history": conversation_history})
+
+# ======================
+# Sessions (optional persistence)
+# ======================
+SESSION_DIR = "sessions"
+os.makedirs(SESSION_DIR, exist_ok=True)
+SESSION_FILE = None
+
+def start_new_session():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(SESSION_DIR, f"session_{timestamp}.json")
+
+def save_session_data(session_file):
+    try:
+        data_to_save = [{"question": q["question"], "answer": q["answer"]} for q in session_memory[-50:]]
+        with open(session_file, "w", encoding="utf-8") as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning(f"⚠️ Failed to save session: {e}")
+
+def cleanup_old_sessions(max_files=10):
+    try:
+        files = sorted(
+            [os.path.join(SESSION_DIR, f) for f in os.listdir(SESSION_DIR) if f.endswith(".json")],
+            key=os.path.getmtime,
+        )
+        for f in files[:-max_files]:
+            try:
+                os.remove(f)
+                log.info(f"🗑️ Deleted old session: {f}")
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning(f"⚠️ Session cleanup error: {e}")
+
+# ======================
+# Startup / Shutdown
+# ======================
+@app.on_event("startup")
+def startup_event():
+    log.info("🚀 Server starting up...")
+    log.info(f"   Project = {GOOGLE_CLOUD_PROJECT}")
+    log.info(f"   Location = {GOOGLE_CLOUD_LOCATION}")
+    log.info(f"   Refresh vectors on startup = {REFRESH_VECTORS_ON_STARTUP}")
+    if netlify_origin:
+        log.info(f"   NETLIFY_ORIGIN = {netlify_origin}")
+    cleanup_old_sessions(max_files=10)
+
+    if REFRESH_VECTORS_ON_STARTUP:
+        refresh_vector_stores()
+        load_ncert_vectors()
+        log.info("✅ Vector stores + NCERT data loaded.")
+    else:
+        log.info("⏭️ Skipping vector refresh/load on startup.")
+
+@app.on_event("shutdown")
+def shutdown_event():
+    log.info("🚪 Server shutting down...")
+    global SESSION_FILE
+    if SESSION_FILE is None:
+        SESSION_FILE = start_new_session()
+    save_session_data(SESSION_FILE)
+    cleanup_old_sessions(max_files=10)
+    log.info(f"💾 Session data saved to {SESSION_FILE}")
+
+# Local dev entrypoint (Cloud Run uses your Docker CMD)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")), reload=False)
