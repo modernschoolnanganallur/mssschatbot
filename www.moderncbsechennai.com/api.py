@@ -269,32 +269,9 @@ def llm_health():
 
 @app.post("/chat")
 async def chat(payload: dict):
-    msg = payload.get("message", "").strip()
-    if not msg:
-        return {"reply": "Please provide a message."}
+    msg = payload.get("message", "")
+    return {"reply": f"Echo: {msg}"}
 
-    # Optional: handle greetings/emotions before LLM
-    if resp := check_greeting(msg):
-        return {"reply": resp}
-    if resp := check_farewell(msg):
-        return {"reply": resp}
-    if resp := detect_emotion(msg):
-        return {"reply": resp}
-
-    # Build prompt for LLM
-    prompt = f"You are Brightly, the AI assistant of Modern Senior Secondary School. Answer concisely:\n{msg}"
-
-    try:
-        answer = get_answer_llm().invoke(prompt)
-    except Exception as e:
-        log.warning(f"⚠️ LLM error: {e}")
-        answer = "I’m having trouble accessing the data at the moment, please try again."
-
-    # Save to conversation memory
-    add_to_memory(msg, answer)
-    conversation_history.append({"question": msg, "answer": answer})
-
-    return {"reply": answer}
 
 
 # ======================
